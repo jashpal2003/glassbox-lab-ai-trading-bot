@@ -1,0 +1,15 @@
+# kernel/config.yaml
+# GlassBox Options - Human-readable, versioned risk limits shown to judges.
+version: 1
+limits:
+  max_portfolio_delta: 250
+  max_portfolio_vega: -250           # Cap on aggregate short-vol exposure
+  max_single_position_pct_bp: 5.0    # Max % of buying power in one position
+  max_open_positions: 8
+  min_buying_power_floor_pct: 20.0   # Never deploy below this cash cushion
+  max_spread_pct_of_mid: 8.0         # Liquidity gate (%)
+  require_defined_risk: true         # No naked legs, ever, no exceptions
+  earnings_blackout_days: 2
+  vix_kill_switch_level: 30.0
+  min_open_interest: 50
+  min_daily_volume: 10

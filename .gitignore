@@ -1,0 +1,20 @@
+# Secrets - never commit real credentials
+.env
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+.venv/
+venv/
+
+# Runtime-generated local state (not source, and may contain real account data)
+verification/audit_trail.jsonl
+perception/agent_memory.json
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

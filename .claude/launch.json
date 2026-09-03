@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "glassbox-web",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-m", "uvicorn", "web.app:app", "--host", "127.0.0.1", "--port", "8001"],
+      "port": 8001
+    }
+  ]
+}

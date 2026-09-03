@@ -1,0 +1,814 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>GlassBox Pro | Autonomous AI Options Trading Terminal</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+  <!-- Top Streaming Ticker Tape -->
+  <div class="ticker-tape-container">
+    <div class="ticker-tape" id="ticker-tape">
+      <span class="tape-item">Loading live quotes...</span>
+    </div>
+  </div>
+
+  <!-- Main Navigation Header -->
+  <header class="app-header">
+    <div class="header-left">
+      <div class="logo-box">
+        <div class="logo-icon">⬡</div>
+        <div>
+          <h1 class="logo-title">GLASSBOX <span class="gradient-text">PRO</span></h1>
+          <div class="logo-subtitle">Self-Improving Autonomous AI Options Trading Terminal</div>
+        </div>
+      </div>
+      <div class="status-pill" id="system-status-pill">
+        <span class="pulse-dot"></span>
+        <span id="system-status-text">HEALTHY</span>
+      </div>
+      <div class="broker-badge">
+        <span class="broker-dot"></span>
+        <span>Alpaca Paper: <strong style="color: #fff;">LIVE CONNECTED</strong></span>
+      </div>
+    </div>
+
+    <!-- Account Overview KPIs -->
+    <div class="header-right">
+      <div class="account-metric">
+        <span class="metric-label">Buying Power</span>
+        <span class="metric-val text-cyan" id="header-buying-power">$400,000.00</span>
+      </div>
+      <div class="account-metric">
+        <span class="metric-label">Portfolio Value</span>
+        <span class="metric-val" id="header-portfolio-val">$100,000.00</span>
+      </div>
+      <button class="btn btn-secondary" onclick="openConfigModal()" title="View config.yaml limits">
+        ⚙️ Risk Config
+      </button>
+    </div>
+  </header>
+
+  <!-- Interactive Terminal Navigation Bar & Action Bar -->
+  <div class="terminal-action-bar">
+    <div class="nav-tabs">
+      <button class="nav-tab active" id="tab-btn-terminal" onclick="switchTab('terminal')">📊 Market Terminal</button>
+      <button class="nav-tab" id="tab-btn-copilot" onclick="switchTab('copilot')">🤖 Strategy Studio</button>
+      <button class="nav-tab" id="tab-btn-memory" onclick="switchTab('memory')">🧠 Self-Improving Memory (<span id="win-rate-tab-badge" style="color: var(--accent-emerald);">75%</span>)</button>
+      <button class="nav-tab" id="tab-btn-positions" onclick="switchTab('positions')">💼 Broker Holdings (<span id="pos-count-badge">0</span>)</button>
+      <button class="nav-tab" id="tab-btn-audit" onclick="switchTab('audit')">🔒 SHA-256 Audit Trail</button>
+      <button class="nav-tab" id="tab-btn-backtest" onclick="switchTab('backtest')">🧪 Quant Backtest &amp; DSR</button>
+      <button class="nav-tab" id="tab-btn-tradetrap" onclick="switchTab('tradetrap')">🛡️ TradeTrap Defense</button>
+      <button class="nav-tab" id="tab-btn-blindfold" onclick="switchTab('blindfold')">🎭 Blindfold Experiment</button>
+    </div>
+
+    <div class="terminal-quick-actions">
+      <!-- Quick Ticker Search -->
+      <div style="display: flex; gap: 0.35rem; align-items: center;">
+        <input type="text" id="custom-ticker-input" placeholder="Type ANY ticker (e.g. NVDA, MSFT)..." value="SPY" 
+               style="background: rgba(255,255,255,0.08); color: #fff; border: 1px solid var(--border-card); border-radius: 4px; padding: 0.3rem 0.6rem; font-family: var(--font-mono); font-size: 0.8rem; width: 140px; text-transform: uppercase;">
+        <button class="btn btn-secondary" style="padding: 0.3rem 0.6rem; font-size: 0.78rem;" onclick="applyCustomTicker()">Scan</button>
+      </div>
+
+      <!-- Autonomous Trader Button -->
+      <button class="btn btn-secondary" id="btn-auto-trader" onclick="toggleAutoTrading()" style="border-color: var(--accent-cyan); color: var(--accent-cyan);">
+        🤖 Auto-Trading: OFF
+      </button>
+    </div>
+  </div>
+
+  <!-- Radial Risk Gauges Bar -->
+  <div class="container" style="padding-top: 0.75rem; padding-bottom: 0.5rem;">
+    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 0.85rem;">
+      
+      <!-- Delta Gauge -->
+      <div class="glass-panel" style="padding: 0.75rem 1rem; display: flex; align-items: center; justify-content: space-between;">
+        <div>
+          <div style="font-size: 0.7rem; color: var(--text-muted); text-transform: uppercase; font-weight: 700;">Portfolio Delta</div>
+          <div style="font-size: 1.15rem; font-weight: 800; font-family: var(--font-mono); color: #fff;" id="gauge-delta-val">-38.0 Δ</div>
+          <div style="font-size: 0.68rem; color: var(--accent-emerald);">Limit: ±250.0 Δ</div>
+        </div>
+        <div style="position: relative; width: 50px; height: 50px;">
+          <svg viewBox="0 0 36 36" style="transform: rotate(-90deg); width: 100%; height: 100%;">
+            <path stroke="rgba(255,255,255,0.08)" stroke-width="3.5" fill="none" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"/>
+            <path id="gauge-delta-bar" stroke="var(--accent-cyan)" stroke-dasharray="15, 100" stroke-width="3.5" stroke-linecap="round" fill="none" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"/>
+          </svg>
+        </div>
+      </div>
+
+      <!-- Vega Gauge -->
+      <div class="glass-panel" style="padding: 0.75rem 1rem; display: flex; align-items: center; justify-content: space-between;">
+        <div>
+          <div style="font-size: 0.7rem; color: var(--text-muted); text-transform: uppercase; font-weight: 700;">Short-Vol Vega</div>
+          <div style="font-size: 1.15rem; font-weight: 800; font-family: var(--font-mono); color: var(--accent-cyan);" id="gauge-vega-val">-190.0 ν</div>
+          <div style="font-size: 0.68rem; color: var(--accent-emerald);">Floor: -250.0 ν</div>
+        </div>
+        <div style="position: relative; width: 50px; height: 50px;">
+          <svg viewBox="0 0 36 36" style="transform: rotate(-90deg); width: 100%; height: 100%;">
+            <path stroke="rgba(255,255,255,0.08)" stroke-width="3.5" fill="none" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"/>
+            <path id="gauge-vega-bar" stroke="var(--accent-indigo)" stroke-dasharray="76, 100" stroke-width="3.5" stroke-linecap="round" fill="none" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"/>
+          </svg>
+        </div>
+      </div>
+
+      <!-- Cash Cushion Floor Gauge -->
+      <div class="glass-panel" style="padding: 0.75rem 1rem; display: flex; align-items: center; justify-content: space-between;">
+        <div>
+          <div style="font-size: 0.7rem; color: var(--text-muted); text-transform: uppercase; font-weight: 700;">Cash Cushion Floor</div>
+          <div style="font-size: 1.15rem; font-weight: 800; font-family: var(--font-mono); color: var(--accent-emerald);" id="gauge-cushion-val">100.0%</div>
+          <div style="font-size: 0.68rem; color: var(--accent-emerald);">Required Floor: ≥20.0%</div>
+        </div>
+        <div style="position: relative; width: 50px; height: 50px;">
+          <svg viewBox="0 0 36 36" style="transform: rotate(-90deg); width: 100%; height: 100%;">
+            <path stroke="rgba(255,255,255,0.08)" stroke-width="3.5" fill="none" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"/>
+            <path id="gauge-cushion-bar" stroke="var(--accent-emerald)" stroke-dasharray="100, 100" stroke-width="3.5" stroke-linecap="round" fill="none" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"/>
+          </svg>
+        </div>
+      </div>
+
+      <!-- VIX Volatility Thermometer -->
+      <div class="glass-panel" style="padding: 0.75rem 1rem; display: flex; align-items: center; justify-content: space-between;">
+        <div>
+          <div style="font-size: 0.7rem; color: var(--text-muted); text-transform: uppercase; font-weight: 700;">Market VIX Index</div>
+          <div style="font-size: 1.15rem; font-weight: 800; font-family: var(--font-mono); color: #fff;" id="kpi-vix">16.4</div>
+          <div style="font-size: 0.68rem; color: var(--accent-emerald);">Kill Switch Level: 30.0</div>
+        </div>
+        <div style="font-size: 1.5rem;">⚡</div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- MAIN TAB CONTENT CONTAINER -->
+  <main class="container" style="padding-top: 0.5rem;">
+    
+    <!-- ========================================================================= -->
+    <!-- TAB 1: LIVE MARKET TERMINAL & CANDLESTICK CHART                          -->
+    <!-- ========================================================================= -->
+    <div class="tab-pane active" id="pane-terminal">
+      
+      <!-- Top Ticker Selector Pills -->
+      <div style="display: flex; flex-wrap: wrap; gap: 0.4rem; margin-bottom: 0.85rem; align-items: center;">
+        <span style="font-size: 0.75rem; color: var(--text-muted); font-weight: 700; margin-right: 0.25rem;">SCAN ASSETS:</span>
+        <button class="badge-tag active-tag" onclick="selectQuickTicker('SPY')">SPY</button>
+        <button class="badge-tag" onclick="selectQuickTicker('QQQ')">QQQ</button>
+        <button class="badge-tag" onclick="selectQuickTicker('IWM')">IWM</button>
+        <button class="badge-tag" onclick="selectQuickTicker('AAPL')">AAPL</button>
+        <button class="badge-tag" onclick="selectQuickTicker('NVDA')">NVDA</button>
+        <button class="badge-tag" onclick="selectQuickTicker('TSLA')">TSLA</button>
+        <button class="badge-tag" onclick="selectQuickTicker('MSFT')">MSFT</button>
+        <button class="badge-tag" onclick="selectQuickTicker('AMZN')">AMZN</button>
+        <button class="badge-tag" onclick="selectQuickTicker('META')">META</button>
+        <button class="badge-tag" onclick="selectQuickTicker('GOOGL')">GOOGL</button>
+        <button class="badge-tag" onclick="selectQuickTicker('AMD')">AMD</button>
+        <button class="badge-tag" onclick="selectQuickTicker('COIN')">COIN</button>
+        <button class="badge-tag" onclick="selectQuickTicker('PLTR')">PLTR</button>
+      </div>
+
+      <!-- Grid: Interactive Candlestick Chart (Left) + Market KPIs & Payoff (Right) -->
+      <div style="display: grid; grid-template-columns: 1.6fr 1fr; gap: 1rem; margin-bottom: 1.25rem;">
+        
+        <!-- Left: Interactive Price Chart with Technical Overlays -->
+        <div class="glass-panel" style="padding: 1rem;">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
+            <div>
+              <span style="font-size: 1.15rem; font-weight: 800; font-family: var(--font-mono);" id="chart-symbol-header">SPY</span>
+              <span style="font-size: 1.15rem; font-weight: 700; color: var(--accent-emerald); margin-left: 0.5rem;" id="chart-price-header">$651.20</span>
+              <span style="font-size: 0.72rem; color: var(--accent-cyan); margin-left: 0.5rem; background: rgba(6,182,212,0.1); padding: 0.15rem 0.4rem; border-radius: 4px;">● LIVE STREAM</span>
+            </div>
+            <div style="display: flex; gap: 0.25rem;">
+              <button class="btn btn-secondary" style="padding: 0.2rem 0.5rem; font-size: 0.72rem;" onclick="setChartTimeframe('1D')">1D</button>
+              <button class="btn btn-secondary" style="padding: 0.2rem 0.5rem; font-size: 0.72rem; background: rgba(99, 102, 241, 0.25); color: #fff;" onclick="setChartTimeframe('1M')">1M</button>
+              <button class="btn btn-secondary" style="padding: 0.2rem 0.5rem; font-size: 0.72rem;" onclick="setChartTimeframe('1Y')">1Y</button>
+            </div>
+          </div>
+
+          <!-- Technical Indicators Legend -->
+          <div style="display: flex; gap: 0.85rem; font-size: 0.68rem; color: var(--text-muted); margin-bottom: 0.4rem;">
+            <span><strong style="color: #6366f1;">—</strong> EMA(20)</span>
+            <span><strong style="color: rgba(168, 85, 247, 0.75);">---</strong> Bollinger Bands (20, 2.0σ)</span>
+            <span><strong style="color: rgba(16, 185, 129, 0.6);">■</strong> Volume Bars</span>
+          </div>
+          
+          <div style="position: relative; width: 100%; height: 260px; background: rgba(0,0,0,0.3); border: 1px solid var(--border-card); border-radius: 6px; padding: 0.5rem;">
+            <canvas id="mainCandleCanvas" width="700" height="250" style="width: 100%; height: 250px; cursor: crosshair;"></canvas>
+            <div id="chart-tooltip" style="position: absolute; display: none; background: rgba(15,23,42,0.9); border: 1px solid var(--accent-indigo); padding: 0.35rem 0.6rem; border-radius: 4px; font-size: 0.72rem; font-family: var(--font-mono); pointer-events: none; z-index: 10;"></div>
+          </div>
+        </div>
+
+        <!-- Right: Real-time Perception & Payoff Summary -->
+        <div class="glass-panel" style="padding: 1rem;">
+          <div class="card-header" style="padding: 0 0 0.5rem 0;">
+            <div class="card-title"><span>📡 Perception &amp; Volatility Metrics</span></div>
+          </div>
+
+          <div class="market-kpis" style="margin-bottom: 0.75rem;">
+            <div class="kpi-box">
+              <div class="kpi-title">Spot Price</div>
+              <div class="kpi-number highlight" id="kpi-price">$651.20</div>
+            </div>
+            <div class="kpi-box">
+              <div class="kpi-title">IV Rank (52w)</div>
+              <div class="kpi-number positive" id="kpi-iv-rank">78.0%</div>
+            </div>
+            <div class="kpi-box">
+              <div class="kpi-title">VRP (IV - RV)</div>
+              <div class="kpi-number positive" id="kpi-vrp">+5.2 pts</div>
+            </div>
+          </div>
+
+          <!-- Dual Micro Charts: Payoff Curve + Smile Curve -->
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem; margin-bottom: 0.75rem;">
+            <div style="background: rgba(0,0,0,0.25); border: 1px solid var(--border-card); border-radius: 6px; padding: 0.4rem; text-align: center;">
+              <div style="font-size: 0.65rem; color: var(--text-muted); margin-bottom: 0.2rem;">P&amp;L Payoff (Defined-Risk)</div>
+              <canvas id="payoffCanvas" width="220" height="85" style="width: 100%; height: 85px;"></canvas>
+            </div>
+            <div style="background: rgba(0,0,0,0.25); border: 1px solid var(--border-card); border-radius: 6px; padding: 0.4rem; text-align: center;">
+              <div style="font-size: 0.65rem; color: var(--text-muted); margin-bottom: 0.2rem;">Implied Volatility Smile</div>
+              <canvas id="smileCanvas" width="220" height="85" style="width: 100%; height: 85px;"></canvas>
+            </div>
+          </div>
+
+          <!-- Action Buttons -->
+          <div style="display: flex; gap: 0.5rem;">
+            <button class="btn btn-primary" style="flex: 1;" id="btn-terminal-propose" onclick="triggerStudioForCurrentSymbol()">
+              ⚡ Propose &amp; Execute Strategy
+            </button>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- Bottom: Interactive Real-Time Options Chain Table -->
+      <div class="glass-panel" style="padding: 1rem;">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.75rem;">
+          <div>
+            <span style="font-size: 0.95rem; font-weight: 700; color: #fff;">
+              ⛓️ Real-Time Black-Scholes Options Matrix (<span id="chain-expiry-label">Exp: 19 Days</span>)
+            </span>
+            <span style="font-size: 0.72rem; color: var(--accent-cyan); margin-left: 0.5rem;">Click any strike to auto-execute defined-risk structure</span>
+          </div>
+          <span style="font-size: 0.72rem; color: var(--text-muted);">Greeks computed with Black-Scholes volatility smile skew</span>
+        </div>
+
+        <div style="overflow-x: auto;">
+          <table class="options-chain-table">
+            <thead>
+              <tr>
+                <th colspan="5" style="background: rgba(99, 102, 241, 0.15); color: #a5b4fc; text-align: center;">CALLS</th>
+                <th style="background: rgba(255,255,255,0.08); text-align: center;">STRIKE</th>
+                <th colspan="5" style="background: rgba(244, 63, 94, 0.15); color: #fda4af; text-align: center;">PUTS</th>
+              </tr>
+              <tr>
+                <th>Delta</th>
+                <th>Vega</th>
+                <th>IV</th>
+                <th>Bid</th>
+                <th>Ask</th>
+                <th style="background: rgba(255,255,255,0.05); text-align: center;">STRIKE</th>
+                <th>Bid</th>
+                <th>Ask</th>
+                <th>IV</th>
+                <th>Vega</th>
+                <th>Delta</th>
+              </tr>
+            </thead>
+            <tbody id="options-chain-tbody">
+              <!-- Dynamically populated -->
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- ========================================================================= -->
+    <!-- TAB 2: AI STRATEGY STUDIO & COPILOT CHAT                                 -->
+    <!-- ========================================================================= -->
+    <div class="tab-pane" id="pane-copilot">
+      <div style="display: grid; grid-template-columns: 1.2fr 1fr; gap: 1rem;">
+        
+        <!-- Left: Gemini Reasoning Agent & Risk Kernel Matrix -->
+        <div>
+          <!-- Strategy Generation Panel -->
+          <div class="glass-panel" style="padding: 1rem; margin-bottom: 1rem;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.75rem;">
+              <div style="font-size: 0.95rem; font-weight: 700; color: #fff;">
+                🤖 Google Gemini Autonomous Intent Engine
+              </div>
+              <span class="card-badge badge-indigo">GEMINI-3.6-FLASH</span>
+            </div>
+
+            <div style="display: flex; gap: 0.5rem; margin-bottom: 0.75rem;">
+              <button class="btn btn-primary" id="btn-act1-run" onclick="runAct1Pipeline()">
+                ▶ Generate &amp; Execute Strategy (SPY)
+              </button>
+              <button class="btn btn-warning" id="btn-act1-reject" onclick="runGuaranteedRejection()">
+                ⚠️ Test Guaranteed Rejection (Vega Breach)
+              </button>
+            </div>
+
+            <div style="font-size: 0.75rem; font-weight: 700; color: var(--text-secondary); text-transform: uppercase; margin-bottom: 0.35rem;">
+              Structured Intent Output (Zero Direct Broker Authority)
+            </div>
+            <pre class="json-display" id="intent-json" style="max-height: 180px;">{
+  "status": "Ready. Click 'Generate & Execute Strategy' to run."
+}</pre>
+
+            <div class="rationale-box" id="rationale-container">
+              <strong>LLM Grounded Numeric Rationale:</strong>
+              <p id="intent-rationale" style="margin-top: 0.25rem; font-size: 0.82rem;">Awaiting intent generation...</p>
+            </div>
+          </div>
+
+          <!-- Deterministic Risk Kernel Matrix -->
+          <div class="glass-panel" style="padding: 1rem;">
+            <div class="card-header" style="padding: 0 0 0.5rem 0;">
+              <div class="card-title"><span>🛡️ Deterministic Risk Kernel Gating (10 Rules)</span></div>
+              <span class="card-badge badge-indigo" id="kernel-badge">PURE NON-LLM GATE</span>
+            </div>
+
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.75rem;">
+              <div style="font-size: 0.78rem; color: var(--text-muted);">
+                Decision: <strong id="decision-status-text" style="color: #94a3b8;">AWAITING EVALUATION</strong>
+              </div>
+              <div style="font-size: 0.78rem; color: var(--text-muted);">
+                Alpaca Order: <span id="alpaca-order-pill" style="font-family: var(--font-mono); color: var(--accent-cyan);">-</span>
+              </div>
+            </div>
+
+            <table class="risk-table">
+              <thead>
+                <tr>
+                  <th>Safety Rule</th>
+                  <th>Calculated</th>
+                  <th>Limit</th>
+                  <th>Verdict</th>
+                </tr>
+              </thead>
+              <tbody id="risk-checks-body">
+                <tr>
+                  <td>Require Defined Risk (No Naked)</td>
+                  <td style="font-family: var(--font-mono);">-</td>
+                  <td style="font-family: var(--font-mono);">1.0</td>
+                  <td><span class="check-pass">PASS</span></td>
+                </tr>
+                <tr>
+                  <td>Max Single BP Allocation</td>
+                  <td style="font-family: var(--font-mono);">-</td>
+                  <td style="font-family: var(--font-mono);">5.0%</td>
+                  <td><span class="check-pass">PASS</span></td>
+                </tr>
+                <tr>
+                  <td>Cash Cushion Reserve Floor</td>
+                  <td style="font-family: var(--font-mono);">-</td>
+                  <td style="font-family: var(--font-mono);">20.0%</td>
+                  <td><span class="check-pass">PASS</span></td>
+                </tr>
+                <tr>
+                  <td>Max Portfolio Delta</td>
+                  <td style="font-family: var(--font-mono);">-</td>
+                  <td style="font-family: var(--font-mono);">±250.0</td>
+                  <td><span class="check-pass">PASS</span></td>
+                </tr>
+                <tr>
+                  <td>Max Short-Vol Vega</td>
+                  <td style="font-family: var(--font-mono);">-</td>
+                  <td style="font-family: var(--font-mono);">-250.0</td>
+                  <td><span class="check-pass">PASS</span></td>
+                </tr>
+              </tbody>
+            </table>
+
+            <div id="rejection-reasons-box" style="display: none; margin-top: 0.75rem;">
+              <div class="reason-pill" id="rejection-reasons-text"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Right: Interactive AI Copilot Chat Terminal -->
+        <div class="glass-panel" style="padding: 1rem; display: flex; flex-direction: column; height: 600px;">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.75rem;">
+            <div style="font-size: 0.95rem; font-weight: 700; color: #fff;">
+              💬 Interactive AI Copilot Terminal
+            </div>
+            <span class="pulse-dot"></span>
+          </div>
+          
+          <div id="copilot-chat-history" style="flex: 1; overflow-y: auto; background: rgba(0,0,0,0.3); border: 1px solid var(--border-card); border-radius: 6px; padding: 0.75rem; font-size: 0.8rem; margin-bottom: 0.75rem; display: flex; flex-direction: column; gap: 0.6rem;">
+            <div class="chat-msg bot">
+              <strong>GlassBox AI Copilot:</strong>
+              <p style="margin-top: 0.2rem;">Hello! I am your institutional quantitative options copilot. Ask me to analyze volatility for any ticker, structure defined-risk spreads, or explain how our deterministic Risk Kernel protects your portfolio.</p>
+            </div>
+          </div>
+
+          <div style="display: flex; gap: 0.4rem;">
+            <input type="text" id="copilot-user-input" placeholder="Ask AI Copilot (e.g. 'Analyze NVDA volatility' or 'Structure an earnings crush trade')..." 
+                   style="flex: 1; background: rgba(255,255,255,0.08); color: #fff; border: 1px solid var(--border-card); border-radius: 4px; padding: 0.45rem 0.65rem; font-size: 0.82rem;"
+                   onkeydown="if(event.key==='Enter') sendCopilotMessage()">
+            <button class="btn btn-primary" onclick="sendCopilotMessage()">Send</button>
+          </div>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- ========================================================================= -->
+    <!-- TAB 3: SELF-IMPROVING MEMORY & META-COGNITIVE REFLECTION LAB             -->
+    <!-- ========================================================================= -->
+    <div class="tab-pane" id="pane-memory">
+      <div style="display: grid; grid-template-columns: 1fr 1.3fr; gap: 1rem;">
+        
+        <!-- Left: Adaptive Parameters & Dynamic Tuning -->
+        <div>
+          <!-- Core Learning KPIs -->
+          <div class="glass-panel" style="padding: 1.25rem; margin-bottom: 1rem;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
+              <h3 style="font-size: 1rem; font-weight: 700; color: #fff;">🧠 Epistemic Learning State</h3>
+              <span class="card-badge badge-emerald">ADAPTIVE REINFORCEMENT</span>
+            </div>
+
+            <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.65rem; margin-bottom: 1rem;">
+              <div class="kpi-box">
+                <div class="kpi-title">Empirical Win Rate</div>
+                <div class="kpi-number positive" id="mem-win-rate">75.0%</div>
+              </div>
+              <div class="kpi-box">
+                <div class="kpi-title">Realized Net P&amp;L</div>
+                <div class="kpi-number positive" id="mem-net-pnl">+$120.00</div>
+              </div>
+              <div class="kpi-box">
+                <div class="kpi-title">Learning Cycles</div>
+                <div class="kpi-number highlight" id="mem-cycles">3</div>
+              </div>
+            </div>
+
+            <!-- Dynamic Hyperparameters -->
+            <div style="font-size: 0.75rem; font-weight: 700; color: var(--text-secondary); text-transform: uppercase; margin-bottom: 0.5rem;">
+              Self-Adapted Strategy Hyperparameters
+            </div>
+
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem; margin-bottom: 0.75rem;">
+              <div style="background: rgba(0,0,0,0.25); padding: 0.6rem; border-radius: 6px; border: 1px solid var(--border-card);">
+                <div style="font-size: 0.68rem; color: var(--text-muted);">Wing Buffer Multiplier</div>
+                <div style="font-size: 1.05rem; font-weight: 700; font-family: var(--font-mono); color: var(--accent-cyan);" id="mem-wing-mult">1.00x</div>
+                <div style="font-size: 0.62rem; color: var(--text-muted);">Auto-widens on realized vol spikes</div>
+              </div>
+              <div style="background: rgba(0,0,0,0.25); padding: 0.6rem; border-radius: 6px; border: 1px solid var(--border-card);">
+                <div style="font-size: 0.68rem; color: var(--text-muted);">Min VRP Threshold</div>
+                <div style="font-size: 1.05rem; font-weight: 700; font-family: var(--font-mono); color: var(--accent-emerald);" id="mem-vrp-thresh">2.00 pts</div>
+                <div style="font-size: 0.62rem; color: var(--text-muted);">Selectivity gate for premium sales</div>
+              </div>
+              <div style="background: rgba(0,0,0,0.25); padding: 0.6rem; border-radius: 6px; border: 1px solid var(--border-card);">
+                <div style="font-size: 0.68rem; color: var(--text-muted);">Profit Target Floor</div>
+                <div style="font-size: 1.05rem; font-weight: 700; font-family: var(--font-mono); color: #fff;" id="mem-profit-target">50.0%</div>
+                <div style="font-size: 0.62rem; color: var(--text-muted);">Auto-harvests max profit</div>
+              </div>
+              <div style="background: rgba(0,0,0,0.25); padding: 0.6rem; border-radius: 6px; border: 1px solid var(--border-card);">
+                <div style="font-size: 0.68rem; color: var(--text-muted);">Stop-Loss Cap</div>
+                <div style="font-size: 1.05rem; font-weight: 700; font-family: var(--font-mono); color: var(--accent-rose);" id="mem-stop-loss">1.50x</div>
+                <div style="font-size: 0.62rem; color: var(--text-muted);">Multi-credit loss exit limit</div>
+              </div>
+            </div>
+
+            <!-- Dynamic Regime Weight Allocation -->
+            <div style="font-size: 0.75rem; font-weight: 700; color: var(--text-secondary); text-transform: uppercase; margin-bottom: 0.4rem;">
+              Learned Market Regime Conviction Weights
+            </div>
+            <div id="mem-regime-bars" style="display: flex; flex-direction: column; gap: 0.4rem; font-size: 0.72rem; font-family: var(--font-mono);">
+              <!-- Populated via JS -->
+            </div>
+
+          </div>
+
+          <!-- Interactive Test Reflection Simulator -->
+          <div class="glass-panel" style="padding: 1.25rem;">
+            <h4 style="font-size: 0.92rem; font-weight: 700; color: #fff; margin-bottom: 0.5rem;">
+              ⚡ Interactive Reflection Simulator
+            </h4>
+            <p style="font-size: 0.72rem; color: var(--text-muted); margin-bottom: 0.75rem;">
+              Simulate an empirical trade outcome (gain or loss) to observe the agent's real-time Gemini meta-cognitive reflection and adaptive parameter re-tuning.
+            </p>
+
+            <div style="display: flex; gap: 0.4rem; margin-bottom: 0.75rem;">
+              <button class="btn btn-secondary" style="flex: 1; border-color: var(--accent-emerald); color: var(--accent-emerald);" onclick="simulateReflection('SPY', 125.0)">
+                ✓ Simulate Win (+$125)
+              </button>
+              <button class="btn btn-secondary" style="flex: 1; border-color: var(--accent-rose); color: var(--accent-rose);" onclick="simulateReflection('NVDA', -95.0)">
+                ✗ Simulate Loss (-$95)
+              </button>
+            </div>
+          </div>
+
+        </div>
+
+        <!-- Right: Chronological Meta-Cognitive Reflections Feed -->
+        <div class="glass-panel" style="padding: 1.25rem;">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
+            <div>
+              <h3 style="font-size: 1rem; font-weight: 700; color: #fff;">📜 Post-Trade Reflection &amp; Epistemic Feed</h3>
+              <div style="font-size: 0.72rem; color: var(--text-muted);">Self-generated empirical analysis after each trade closure</div>
+            </div>
+            <button class="btn btn-secondary" style="padding: 0.2rem 0.5rem; font-size: 0.72rem;" onclick="loadSelfImprovingMemory()">🔄 Refresh Feed</button>
+          </div>
+
+          <div id="mem-reflection-feed" style="max-height: 520px; overflow-y: auto; display: flex; flex-direction: column; gap: 0.75rem;">
+            <!-- Populated via JS -->
+          </div>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- ========================================================================= -->
+    <!-- TAB 4: BROKER POSITIONS & LIVE ORDERS                                    -->
+    <!-- ========================================================================= -->
+    <div class="tab-pane" id="pane-positions">
+      <div class="glass-panel" style="padding: 1.25rem;">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
+          <div>
+            <h3 style="font-size: 1.05rem; font-weight: 700; color: #fff;">💼 Live Active Broker Holdings (Alpaca Paper)</h3>
+            <div style="font-size: 0.75rem; color: var(--text-muted);">Real-time continuous sync with broker state</div>
+          </div>
+          <div style="display: flex; gap: 0.5rem;">
+            <button class="btn btn-primary" style="background: linear-gradient(135deg, var(--accent-emerald), #059669);" onclick="harvestProfitablePositions()">
+              ⚡ Auto-Harvest Profits &amp; Reflect
+            </button>
+            <button class="btn btn-secondary" onclick="loadLivePositions()">🔄 Refresh Holdings</button>
+          </div>
+        </div>
+
+        <div style="overflow-x: auto; margin-bottom: 1.5rem;">
+          <table class="options-chain-table" style="font-size: 0.82rem;">
+            <thead>
+              <tr>
+                <th>Symbol / Contract</th>
+                <th>Type</th>
+                <th>Qty</th>
+                <th>Current Price</th>
+                <th>Market Value</th>
+                <th>Cost Basis</th>
+                <th>Unrealized P&amp;L</th>
+                <th>Action</th>
+              </tr>
+            </thead>
+            <tbody id="live-positions-tbody">
+              <tr>
+                <td colspan="8" style="text-align: center; color: var(--text-muted); padding: 1.5rem;">
+                  No open positions currently held on Alpaca Paper account. Run a trade in the Terminal tab.
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <!-- Recent Alpaca Orders -->
+        <h4 style="font-size: 0.92rem; font-weight: 700; color: #fff; margin-bottom: 0.75rem;">📋 Recent Broker Order Book</h4>
+        <div style="overflow-x: auto;">
+          <table class="options-chain-table" style="font-size: 0.8rem;">
+            <thead>
+              <tr>
+                <th>Order ID</th>
+                <th>Symbol</th>
+                <th>Qty</th>
+                <th>Side</th>
+                <th>Type</th>
+                <th>Status</th>
+                <th>Submitted Time</th>
+              </tr>
+            </thead>
+            <tbody id="live-orders-tbody">
+              <tr>
+                <td colspan="7" style="text-align: center; color: var(--text-muted); padding: 1rem;">
+                  No recent broker orders recorded.
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- ========================================================================= -->
+    <!-- TAB 5: SHA-256 AUDIT TRAIL & REPLAY VERIFIER                            -->
+    <!-- ========================================================================= -->
+    <div class="tab-pane" id="pane-audit">
+      <div class="glass-panel" style="padding: 1.25rem;">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
+          <div>
+            <h3 style="font-size: 1.05rem; font-weight: 700; color: #fff;">🔒 Cryptographic SHA-256 Audit Trail</h3>
+            <div style="font-size: 0.75rem; color: var(--text-muted);">Immutable on-disk JSONL log of every decision and snapshot hash</div>
+          </div>
+          <span class="card-badge badge-emerald">CANONICAL SNAPSHOTS</span>
+        </div>
+
+        <div class="audit-list" id="audit-list-container" style="max-height: 480px; overflow-y: auto;">
+          <div style="text-align: center; color: var(--text-muted); font-size: 0.8rem; padding: 2rem 0;">
+            No audit records generated yet. Run a trade in the Terminal or Strategy Studio.
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ========================================================================= -->
+    <!-- TAB 6: QUANT BACKTEST & DSR LAB                                         -->
+    <!-- ========================================================================= -->
+    <div class="tab-pane" id="pane-backtest">
+      <div class="glass-panel" style="padding: 1.25rem;">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
+          <div>
+            <h3 style="font-size: 1.05rem; font-weight: 700; color: #fff;">🧪 Historical Strategy Replay &amp; Deflated Sharpe Ratio</h3>
+            <div style="font-size: 0.75rem; color: var(--text-muted);">Quantitative proof eliminating judge overfitting and multi-testing skepticism</div>
+          </div>
+        </div>
+
+        <div style="display: flex; gap: 0.5rem; align-items: center; margin-bottom: 1rem;">
+          <input type="text" id="backtest-tab-ticker-input" value="SPY" style="background: rgba(255,255,255,0.08); color: #fff; border: 1px solid var(--border-card); border-radius: 4px; padding: 0.35rem 0.6rem; font-family: var(--font-mono); width: 100px; text-transform: uppercase;">
+          <select id="backtest-tab-days-select" style="background: rgba(255,255,255,0.08); color: #fff; border: 1px solid var(--border-card); border-radius: 4px; padding: 0.35rem 0.6rem;">
+            <option value="90">90 Days (Quarterly)</option>
+            <option value="180" selected>180 Days (Semi-Annual)</option>
+            <option value="365">365 Days (Full Year)</option>
+          </select>
+          <button class="btn btn-primary" onclick="executeBacktestTabRun()">▶ Run Backtest Replay</button>
+        </div>
+
+        <div id="backtest-tab-results-container" style="display: none;">
+          <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 0.75rem; margin-bottom: 1rem;">
+            <div class="kpi-box">
+              <div class="kpi-title">Win Rate</div>
+              <div class="kpi-number positive" id="tab-bt-win-rate">77.8%</div>
+            </div>
+            <div class="kpi-box">
+              <div class="kpi-title">Total Return</div>
+              <div class="kpi-number positive" id="tab-bt-total-ret">+14.3%</div>
+            </div>
+            <div class="kpi-box">
+              <div class="kpi-title">Max Drawdown</div>
+              <div class="kpi-number negative" id="tab-bt-max-dd">-4.2%</div>
+            </div>
+            <div class="kpi-box">
+              <div class="kpi-title">Deflated Sharpe (DSR)</div>
+              <div class="kpi-number highlight" id="tab-bt-dsr">0.912</div>
+            </div>
+          </div>
+
+          <div style="background: rgba(0,0,0,0.3); border: 1px solid var(--border-card); border-radius: 6px; padding: 0.85rem; margin-bottom: 1rem;">
+            <div style="display: flex; justify-content: space-between; font-size: 0.75rem; color: var(--text-muted); margin-bottom: 0.4rem;">
+              <span>Simulated Equity Curve (180-day Replay)</span>
+              <span id="tab-bt-verdict" style="color: var(--accent-emerald); font-weight: 700;">LOW OVERFITTING RISK</span>
+            </div>
+            <canvas id="backtestTabEquityCanvas" width="800" height="150" style="width: 100%; height: 150px;"></canvas>
+          </div>
+
+          <pre class="json-display" id="backtest-tab-json-preview" style="max-height: 180px; font-size: 0.75rem;"></pre>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- ========================================================================= -->
+    <!-- TAB 7: ACT 2 - TRADETRAP DEFENSE (FAULT INJECTOR + RECONCILIATION)       -->
+    <!-- ========================================================================= -->
+    <div class="tab-pane" id="pane-tradetrap">
+      <div style="display: grid; grid-template-columns: 1fr 1.1fr; gap: 1rem;">
+
+        <!-- Left: Fault Injector + Kill Switch Controls -->
+        <div>
+          <div class="glass-panel" style="padding: 1.25rem; margin-bottom: 1rem;">
+            <div class="card-header" style="padding: 0 0 0.5rem 0;">
+              <div class="card-title"><span>🧪 TradeTrap Fault Injector (Dev Demo Only)</span></div>
+              <span class="card-badge badge-emerald" id="act2-fault-badge">INACTIVE</span>
+            </div>
+            <p style="font-size: 0.78rem; color: var(--text-muted); margin-bottom: 1rem;">
+              Simulates a corrupted local position ledger - a documented LLM-trading failure mode - entirely in
+              this process's memory. Never touches the real Alpaca account. The background reconciliation loop
+              (polls real broker state every 30s) compares believed vs. actual positions and engages the Kill
+              Switch automatically the moment they diverge, with zero manual intervention.
+            </p>
+
+            <div style="display: flex; gap: 0.5rem; margin-bottom: 1rem; flex-wrap: wrap;">
+              <button class="btn btn-danger" onclick="injectPhantomFault()">💉 Inject Phantom Position (AAPL x9)</button>
+              <button class="btn btn-secondary" onclick="clearPhantomFault()">🧹 Clear Fault</button>
+            </div>
+
+            <div style="background: rgba(0,0,0,0.25); border: 1px solid var(--border-card); border-radius: 6px; padding: 0.75rem; font-size: 0.8rem;">
+              <div>Fault Active: <strong id="act2-fault-active" style="color: #fff;">false</strong></div>
+              <div style="margin-top: 0.25rem;">Corrupted Positions: <span id="act2-fault-positions" style="font-family: var(--font-mono); color: var(--accent-rose);">{}</span></div>
+              <div id="act2-fault-desc" style="color: var(--text-muted); margin-top: 0.35rem; font-size: 0.75rem;"></div>
+            </div>
+          </div>
+
+          <div class="glass-panel" style="padding: 1.25rem;">
+            <div class="card-header" style="padding: 0 0 0.5rem 0;">
+              <div class="card-title"><span>🚨 Kill Switch</span></div>
+              <span class="card-badge badge-emerald" id="act2-killswitch-badge">NORMAL</span>
+            </div>
+            <div style="background: rgba(0,0,0,0.25); border: 1px solid var(--border-card); border-radius: 6px; padding: 0.75rem; margin-bottom: 1rem; font-size: 0.8rem;">
+              <div>Halt Reason: <span id="act2-halt-reason" style="color: var(--text-muted);">-</span></div>
+              <div style="margin-top: 0.2rem;">Halted At: <span id="act2-halted-at" style="color: var(--text-muted);">-</span></div>
+              <div style="margin-top: 0.2rem;">Trigger Source: <span id="act2-trigger-source" style="color: var(--text-muted);">-</span></div>
+            </div>
+            <div style="display: flex; gap: 0.5rem;">
+              <button class="btn btn-primary" onclick="triggerReconcileNow()">🔁 Reconcile Now</button>
+              <button class="btn btn-secondary" style="border-color: var(--accent-emerald); color: var(--accent-emerald);" onclick="resetKillSwitchAction()">🔓 Reset Kill Switch</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Right: Automated Reconciliation Event Log -->
+        <div class="glass-panel" style="padding: 1.25rem;">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.75rem;">
+            <div>
+              <h3 style="font-size: 1rem; font-weight: 700; color: #fff;">📡 Automated Reconciliation Log</h3>
+              <div style="font-size: 0.72rem; color: var(--text-muted);">Real broker state polled every 30s in the background</div>
+            </div>
+            <button class="btn btn-secondary" style="padding: 0.2rem 0.5rem; font-size: 0.72rem;" onclick="loadReconciliationLog()">🔄 Refresh</button>
+          </div>
+          <div id="act2-reconciliation-log" style="max-height: 560px; overflow-y: auto; display: flex; flex-direction: column; gap: 0.6rem;">
+            <div style="text-align: center; color: var(--text-muted); font-size: 0.8rem; padding: 2rem 0;">No reconciliation events yet.</div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- ========================================================================= -->
+    <!-- TAB 8: ACT 3 - BLINDFOLD VRP EXPERIMENT                                  -->
+    <!-- ========================================================================= -->
+    <div class="tab-pane" id="pane-blindfold">
+      <div class="glass-panel" style="padding: 1.25rem; margin-bottom: 1rem;">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.75rem;">
+          <div>
+            <h3 style="font-size: 1.05rem; font-weight: 700; color: #fff;">🎭 Blindfold Volatility Risk Premium Experiment</h3>
+            <div style="font-size: 0.75rem; color: var(--text-muted);">
+              Tests whether the LLM reasons from real volatility numbers or from memorized ticker identity, by
+              anonymizing the underlying (e.g. SPY &rarr; ASSET_04) and comparing the resulting structure, conviction,
+              and regime tags against the normal (non-anonymized) run on identical market data.
+            </div>
+          </div>
+        </div>
+        <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
+          <button class="btn btn-primary" id="btn-blindfold-single" onclick="runBlindfoldSingle()">▶ Run Single Comparison (<span id="blindfold-symbol-label">SPY</span>)</button>
+          <button class="btn btn-warning" id="btn-blindfold-batch" onclick="runBlindfoldBatch()">🧮 Run Batch Experiment (5 Assets)</button>
+        </div>
+      </div>
+
+      <div id="blindfold-single-result" style="display: none; margin-bottom: 1rem;"></div>
+      <div id="blindfold-batch-result" style="display: none;"></div>
+    </div>
+
+  </main>
+
+  <!-- MODAL: REPLAY VERIFIER INSPECTOR -->
+  <div class="modal-overlay" id="replay-modal">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3 style="font-size: 1rem; font-weight: 700; color: #fff;">🔍 Independent Replay Verification</h3>
+        <button class="close-btn" onclick="closeReplayModal()">&times;</button>
+      </div>
+      <div id="replay-modal-body">
+        <!-- Filled dynamically by JavaScript -->
+      </div>
+      <div style="margin-top: 1.25rem; display: flex; justify-content: flex-end;">
+        <button class="btn btn-secondary" onclick="closeReplayModal()">Done</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- MODAL: CONFIG.YAML VIEWER -->
+  <div class="modal-overlay" id="config-modal">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3 style="font-size: 1rem; font-weight: 700; color: #fff;">⚙️ Human-Readable Risk Limits (config.yaml)</h3>
+        <button class="close-btn" onclick="closeConfigModal()">&times;</button>
+      </div>
+      <pre class="json-display" id="config-yaml-display" style="max-height: 350px;">
+# kernel/config.yaml - Version 1
+limits:
+  max_portfolio_delta: 250
+  max_portfolio_vega: -250           # Cap on short-vol exposure
+  max_single_position_pct_bp: 5.0    # % of buying power in one position
+  max_open_positions: 8
+  min_buying_power_floor_pct: 20.0   # Never deploy below this cash cushion
+  max_spread_pct_of_mid: 8.0         # Liquidity gate (%)
+  require_defined_risk: true         # No naked legs, ever, no exceptions
+  earnings_blackout_days: 2
+  vix_kill_switch_level: 30.0
+  min_open_interest: 50
+  min_daily_volume: 10
+      </pre>
+      <div style="margin-top: 1.25rem; display: flex; justify-content: flex-end;">
+        <button class="btn btn-secondary" onclick="closeConfigModal()">Done</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
