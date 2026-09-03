@@ -63,8 +63,10 @@
       <button class="nav-tab" id="tab-btn-positions" onclick="switchTab('positions')">💼 Broker Holdings (<span id="pos-count-badge">0</span>)</button>
       <button class="nav-tab" id="tab-btn-audit" onclick="switchTab('audit')">🔒 SHA-256 Audit Trail</button>
       <button class="nav-tab" id="tab-btn-backtest" onclick="switchTab('backtest')">🧪 Quant Backtest &amp; DSR</button>
+      <button class="nav-tab" id="tab-btn-arena" onclick="switchTab('arena')">🏟️ Strategy Arena</button>
       <button class="nav-tab" id="tab-btn-tradetrap" onclick="switchTab('tradetrap')">🛡️ TradeTrap Defense</button>
       <button class="nav-tab" id="tab-btn-blindfold" onclick="switchTab('blindfold')">🎭 Blindfold Experiment</button>
+      <button class="nav-tab" id="tab-btn-judgedemo" onclick="switchTab('judgedemo')">🎬 Judge Demo</button>
     </div>
 
     <div class="terminal-quick-actions">
@@ -761,6 +763,128 @@
 
       <div id="blindfold-single-result" style="display: none; margin-bottom: 1rem;"></div>
       <div id="blindfold-batch-result" style="display: none;"></div>
+    </div>
+
+    <!-- ========================================================================= -->
+    <!-- TAB 9: STRATEGY ARENA - REGIME ENGINE + STRATEGY TOURNAMENT              -->
+    <!-- ========================================================================= -->
+    <div class="tab-pane" id="pane-arena">
+
+      <!-- Regime Engine panel -->
+      <div class="glass-panel" style="padding: 1.25rem; margin-bottom: 1rem;">
+        <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 0.75rem;">
+          <div>
+            <h3 style="font-size: 1.05rem; font-weight: 700; color: #fff;">🧭 Market Regime Engine</h3>
+            <div style="font-size: 0.75rem; color: var(--text-muted);">
+              Deterministic classification from real market numbers - no LLM. The regime decides which
+              strategies are even <em>allowed</em> to compete.
+            </div>
+          </div>
+          <span class="card-badge badge-indigo" id="arena-regime-badge">AWAITING SCAN</span>
+        </div>
+
+        <div style="display: grid; grid-template-columns: 1.1fr 1fr; gap: 1rem;">
+          <div style="background: rgba(0,0,0,0.25); border: 1px solid var(--border-card); border-radius: 6px; padding: 0.85rem;">
+            <div style="font-size: 1.35rem; font-weight: 800; color: var(--accent-cyan);" id="arena-regime-label">—</div>
+            <div style="font-size: 0.78rem; color: var(--text-secondary); margin-top: 0.35rem; line-height: 1.45;" id="arena-regime-desc">
+              Run a scan to classify the current environment.
+            </div>
+            <div style="margin-top: 0.6rem; font-size: 0.75rem;">
+              Confidence: <strong id="arena-regime-conf" style="color: #fff;">—</strong>
+              <span id="arena-regime-complete" style="margin-left: 0.6rem; color: var(--text-muted);"></span>
+            </div>
+            <div id="arena-regime-tags" style="display: flex; flex-wrap: wrap; gap: 0.3rem; margin-top: 0.6rem;"></div>
+          </div>
+
+          <div style="background: rgba(0,0,0,0.25); border: 1px solid var(--border-card); border-radius: 6px; padding: 0.85rem;">
+            <div style="font-size: 0.72rem; font-weight: 700; color: var(--text-secondary); text-transform: uppercase; margin-bottom: 0.5rem;">
+              Signals Driving The Classification
+            </div>
+            <table style="width: 100%; font-size: 0.75rem; font-family: var(--font-mono);" id="arena-regime-signals">
+              <tbody><tr><td style="color: var(--text-muted);">Run a scan to populate.</td></tr></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- Tournament panel -->
+      <div class="glass-panel" style="padding: 1.25rem;">
+        <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 0.85rem;">
+          <div>
+            <h3 style="font-size: 1.05rem; font-weight: 700; color: #fff;">🏟️ Strategy Arena Tournament</h3>
+            <div style="font-size: 0.75rem; color: var(--text-muted);">
+              Every strategy variant replayed over the <strong>same</strong> real historical bars. The
+              champion must be eligible for the current regime AND out-score the field.
+            </div>
+          </div>
+          <div style="display: flex; gap: 0.5rem; align-items: center;">
+            <select id="arena-lookback-select" style="background: rgba(255,255,255,0.08); color: #fff; border: 1px solid var(--border-card); border-radius: 4px; padding: 0.35rem 0.6rem; font-size: 0.8rem;">
+              <option value="180">180d lookback</option>
+              <option value="365" selected>365d lookback</option>
+              <option value="540">540d lookback</option>
+            </select>
+            <button class="btn btn-primary" id="btn-arena-run" onclick="runStrategyArena()">▶ Run Tournament</button>
+          </div>
+        </div>
+
+        <div id="arena-champion-box" style="display: none; margin-bottom: 0.85rem;"></div>
+
+        <div style="overflow-x: auto;">
+          <table class="options-chain-table" style="font-size: 0.8rem;">
+            <thead>
+              <tr>
+                <th>Rank</th>
+                <th>Strategy Variant</th>
+                <th>Eligible</th>
+                <th>Cycles</th>
+                <th>Win %</th>
+                <th>Expectancy</th>
+                <th>Max DD</th>
+                <th>Sharpe</th>
+                <th>DSR</th>
+                <th>Score</th>
+              </tr>
+            </thead>
+            <tbody id="arena-leaderboard-body">
+              <tr><td colspan="10" style="text-align: center; color: var(--text-muted); padding: 1.5rem;">
+                No tournament run yet. Click "Run Tournament" to score every variant on real history.
+              </td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div id="arena-methodology" style="margin-top: 0.85rem; font-size: 0.72rem; color: var(--text-muted); line-height: 1.5;"></div>
+        <div id="arena-bias" style="margin-top: 0.6rem; display: none;"></div>
+      </div>
+    </div>
+
+    <!-- ========================================================================= -->
+    <!-- TAB 10: JUDGE DEMO - THE WHOLE STORY, ONE BUTTON                        -->
+    <!-- ========================================================================= -->
+    <div class="tab-pane" id="pane-judgedemo">
+      <div class="glass-panel" style="padding: 1.25rem; margin-bottom: 1rem;">
+        <div style="display: flex; justify-content: space-between; align-items: flex-start;">
+          <div>
+            <h3 style="font-size: 1.05rem; font-weight: 700; color: #fff;">🎬 The Whole Story, One Button</h3>
+            <div style="font-size: 0.75rem; color: var(--text-muted); max-width: 46rem; line-height: 1.5;">
+              Runs the complete production path end to end against real data: perception → regime →
+              strategy tournament → reasoning → risk kernel → audit receipt → independent replay
+              verification → a guaranteed rejection → TradeTrap ledger corruption and kill switch →
+              recovery → measured learning state. Nothing here is a scripted animation; every step is
+              the real code path.
+            </div>
+          </div>
+          <div style="display: flex; flex-direction: column; gap: 0.5rem; align-items: flex-end;">
+            <button class="btn btn-primary" id="btn-judge-demo" onclick="runJudgeDemo()">▶ Run Full Story</button>
+            <label style="font-size: 0.72rem; color: var(--text-muted); display: flex; align-items: center; gap: 0.35rem; cursor: pointer;">
+              <input type="checkbox" id="judge-demo-execute"> place the approved order for real
+            </label>
+          </div>
+        </div>
+      </div>
+
+      <div id="judge-demo-summary" style="display: none; margin-bottom: 1rem;"></div>
+      <div id="judge-demo-timeline"></div>
     </div>
 
   </main>

@@ -45,34 +45,40 @@ def verify_defined_risk_and_max_loss(intent: Intent) -> tuple[bool, float, float
     short_calls = [leg for leg in intent.legs if leg.action == "sell" and leg.type == "call"]
     long_calls = [leg for leg in intent.legs if leg.action == "buy" and leg.type == "call"]
 
-    # Defined risk rule: every short put must have a long put with lower strike
-    # every short call must have a long call with higher strike
+    # Defined-risk rule: EVERY short leg must be paired with a long leg of the same option type.
+    # An unpaired short leg is naked and is always rejected - that rule is absolute.
+    #
+    # Pairing preference is the protective wing beyond the short strike (long put below a short
+    # put, long call above a short call), which is the credit-spread/condor case and gives the
+    # conservative widest-width max loss. If no such wing exists, a same-type long leg on the
+    # OTHER side still caps the risk - that is a debit spread (e.g. long 100 call / short 110
+    # call), where max loss is the debit paid and the short leg cannot run away because the long
+    # leg gains faster. Requiring the wing to be directional would reject legitimate defined-risk
+    # debit spreads as "naked", which they are not.
     is_defined = True
     max_loss_per_share = 0.0
-    
-    if short_puts:
-        if not long_puts:
-            is_defined = False
-        else:
-            for sp in short_puts:
-                matching_lp = [lp for lp in long_puts if lp.strike < sp.strike]
-                if not matching_lp:
-                    is_defined = False
-                else:
-                    spread_width = sp.strike - min(lp.strike for lp in matching_lp)
-                    max_loss_per_share = max(max_loss_per_share, spread_width)
 
-    if short_calls:
-        if not long_calls:
-            is_defined = False
+    for sp in short_puts:
+        protective = [lp for lp in long_puts if lp.strike < sp.strike]
+        if protective:
+            spread_width = sp.strike - min(lp.strike for lp in protective)
+        elif long_puts:
+            spread_width = abs(min(long_puts, key=lambda lp: abs(lp.strike - sp.strike)).strike - sp.strike)
         else:
-            for sc in short_calls:
-                matching_lc = [lc for lc in long_calls if lc.strike > sc.strike]
-                if not matching_lc:
-                    is_defined = False
-                else:
-                    spread_width = min(lc.strike for lc in matching_lc) - sc.strike
-                    max_loss_per_share = max(max_loss_per_share, spread_width)
+            is_defined = False
+            continue
+        max_loss_per_share = max(max_loss_per_share, spread_width)
+
+    for sc in short_calls:
+        protective = [lc for lc in long_calls if lc.strike > sc.strike]
+        if protective:
+            spread_width = min(lc.strike for lc in protective) - sc.strike
+        elif long_calls:
+            spread_width = abs(min(long_calls, key=lambda lc: abs(lc.strike - sc.strike)).strike - sc.strike)
+        else:
+            is_defined = False
+            continue
+        max_loss_per_share = max(max_loss_per_share, spread_width)
 
     total_max_loss = max_loss_per_share * 100.0 * intent.size
     if total_max_loss == 0.0:

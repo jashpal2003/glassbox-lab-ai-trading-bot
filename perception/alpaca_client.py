@@ -36,7 +36,7 @@ from shared.schemas import (
     AccountState, Position, MarketContext, OptionContractQuote, OptionType
 )
 from perception.vol_metrics import (
-    calculate_realized_volatility, calculate_iv_rank, calculate_vrp
+    calculate_realized_volatility, calculate_iv_rank, calculate_vrp, calculate_trend_signals
 )
 from perception.liquidity import compute_spread_pct_of_mid
 from perception.earnings_calendar import get_days_until_earnings
@@ -46,6 +46,21 @@ load_dotenv()
 
 CBOE_VIX_URL = "https://cdn.cboe.com/api/global/us_indices/daily_prices/VIX_History.csv"
 VIX_CACHE_TTL_SECONDS = 900
+
+
+def _signed_qty(position) -> float:
+    """
+    Signed position quantity: positive for long, negative for short.
+
+    Alpaca already returns `qty` signed (e.g. '-8' for a short option leg) AND exposes `side`
+    separately. Negating a value that is already negative double-flips the sign and silently
+    reports every short leg as long - which corrupts portfolio delta/vega, two of the limits the
+    Risk Kernel enforces. Taking the magnitude and applying `side` as the authority is correct
+    whether or not the API's qty carries the sign.
+    """
+    magnitude = abs(float(position.qty))
+    is_short = str(position.side).lower().endswith("short")
+    return -magnitude if is_short else magnitude
 
 
 class AlpacaClient:
@@ -95,7 +110,7 @@ class AlpacaClient:
                 pos_list: List[Position] = []
                 option_symbols: List[str] = []
                 for p in raw_positions:
-                    signed_qty = float(p.qty) if str(p.side).lower().endswith("long") else -float(p.qty)
+                    signed_qty = _signed_qty(p)
                     pos_list.append(Position(
                         symbol=p.symbol,
                         qty=int(signed_qty),
@@ -160,7 +175,7 @@ class AlpacaClient:
         qty_by_symbol = {}
         for p in raw_positions:
             if p.symbol in option_symbols:
-                qty_by_symbol[p.symbol] = float(p.qty) if str(p.side).lower().endswith("long") else -float(p.qty)
+                qty_by_symbol[p.symbol] = _signed_qty(p)
 
         total_delta = 0.0
         total_vega = 0.0
@@ -415,6 +430,9 @@ class AlpacaClient:
 
         account_state = self.get_account_state()
 
+        # Trend / vol-term-structure signals off the same real closes (no extra API calls).
+        trend = calculate_trend_signals(closes)
+
         return MarketContext(
             underlying=ticker,
             underlying_price=round(spot, 2),
@@ -429,6 +447,11 @@ class AlpacaClient:
             account_state=account_state,
             timestamp=now_iso,
             data_source="live",
+            trend_20d_pct=trend["trend_20d_pct"],
+            price_vs_ema20_pct=trend["price_vs_ema20_pct"],
+            rv_short=trend["rv_short"],
+            rv_long=trend["rv_long"],
+            rv_expansion_ratio=trend["rv_expansion_ratio"],
         )
 
     def _get_simulated_market_context(self, ticker: str, now_iso: str) -> MarketContext:
@@ -492,12 +515,18 @@ class AlpacaClient:
             ))
 
         account_state = self.get_account_state()
+        trend = calculate_trend_signals(synthetic_closes)
 
         return MarketContext(
             underlying=ticker, underlying_price=price, iv_rank=iv_rank, realized_vol=rv, vrp=vrp,
             vix=16.4, earnings_days=earn_days, is_earnings_blackout=is_blackout,
             earnings_data_source=earn_source, contracts=contracts, account_state=account_state,
-            timestamp=now_iso, data_source="simulated"
+            timestamp=now_iso, data_source="simulated",
+            trend_20d_pct=trend["trend_20d_pct"],
+            price_vs_ema20_pct=trend["price_vs_ema20_pct"],
+            rv_short=trend["rv_short"],
+            rv_long=trend["rv_long"],
+            rv_expansion_ratio=trend["rv_expansion_ratio"],
         )
 
     # ------------------------------------------------------------------

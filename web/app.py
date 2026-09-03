@@ -24,6 +24,8 @@ from shared.schemas import (
 from perception.alpaca_client import AlpacaClient
 from reasoning.agent import LLMReasoningAgent
 from reasoning.blindfold import BlindfoldExperiment
+from reasoning.regime_engine import classify_regime_detailed
+from reasoning.strategy_arena import strategy_arena
 from kernel.risk_kernel import validate, load_risk_config
 from kernel.kill_switch import kill_switch
 from kernel.executor import AlpacaExecutor
@@ -428,6 +430,77 @@ def run_guaranteed_rejection_scenario():
         "snapshot": snapshot.model_dump()
     }
 
+# --- MARKET REGIME ENGINE & STRATEGY ARENA ---
+
+@app.get("/api/regime/{symbol}")
+def get_market_regime(symbol: str = "SPY"):
+    """Deterministic regime classification with the real signals that produced it."""
+    ctx = alpaca_client.get_market_context(symbol.upper())
+    return classify_regime_detailed(ctx).model_dump()
+
+class ArenaRequest(BaseModel):
+    symbol: str = "SPY"
+    lookback_days: int = 365
+    refresh: bool = False
+
+@app.post("/api/arena/score")
+def score_strategy_arena(req: ArenaRequest):
+    """
+    Runs the Strategy Arena tournament: every variant replayed over the same real historical
+    closes, ranked by composite score, champion selected from those eligible in the current regime.
+    """
+    ctx = alpaca_client.get_market_context(req.symbol.upper())
+    arena = strategy_arena.run_tournament(
+        ctx, lookback_days=req.lookback_days, use_cache=not req.refresh
+    )
+    return arena.model_dump()
+
+@app.get("/api/arena/registry")
+def get_strategy_registry():
+    """The strategy population, including each variant's parameters and regime eligibility."""
+    return {"variants": [v.model_dump() for v in strategy_arena.get_registry()]}
+
+@app.post("/api/pipeline/arena_run")
+def run_arena_driven_pipeline(req: ProposeRequest):
+    """
+    The full evidence-gated path:
+    Regime -> Strategy Arena tournament -> champion as evidence -> LLM/deterministic Intent
+    -> Risk Kernel -> execution -> SHA-256 snapshot.
+
+    The arena decides which structures have *earned the right to be considered*; the Risk Kernel
+    still independently decides whether the resulting order may actually be placed.
+    """
+    ctx = alpaca_client.get_market_context(req.symbol.upper())
+    arena = strategy_arena.run_tournament(ctx)
+    intent = reasoning_agent.propose_intent(ctx, arena=arena)
+    decision = validate(intent, ctx.account_state, market_context=ctx)
+
+    order_id = None
+    if decision.approved and intent.size > 0:
+        order_id = executor.execute_intent(intent, decision)
+        if order_id:
+            self_improving_memory.record_entry(
+                intent_dict=intent.model_dump(),
+                market_ctx=ctx.model_dump(),
+                order_id=order_id,
+                decision_dict=decision.model_dump(),
+            )
+
+    snapshot = create_audit_snapshot(
+        ctx=ctx, account=ctx.account_state, intent=intent, decision=decision, order_id=order_id
+    )
+    audit_store.append(snapshot)
+
+    return {
+        "market_context": ctx.model_dump(),
+        "regime": arena.regime.model_dump(),
+        "arena": arena.model_dump(),
+        "intent": intent.model_dump(),
+        "decision": decision.model_dump(by_alias=True),
+        "order_id": order_id,
+        "snapshot": snapshot.model_dump(),
+    }
+
 # --- ACT 2: TRADETRAP DEFENSE & RECONCILIATION ---
 
 class FaultRequest(BaseModel):
@@ -558,6 +631,165 @@ def get_options_payoff_and_smile(symbol: str = "SPY"):
         "breakeven_upper": round(c_short + (credit / 100.0), 2),
         "payoff_curve": payoff_curve,
         "volatility_smile": smile_points
+    }
+
+# --- JUDGE DEMO: THE WHOLE STORY IN ONE CALL ---
+
+class DemoRequest(BaseModel):
+    symbol: str = "SPY"
+    execute: bool = False   # when False the approved trade is NOT submitted to the broker
+
+@app.post("/api/demo/story")
+def run_judge_demo_story(req: DemoRequest):
+    """
+    Plays the complete GlassBox narrative in one request and returns it as an ordered timeline
+    of real steps, so the demo doesn't depend on clicking through eight tabs in the right order.
+
+    Every step below runs the real production code path against real data - nothing here is a
+    scripted animation. `execute=false` (the default) runs the full decision path but does not
+    submit the approved order, so the story can be replayed safely without placing a new order
+    on each run.
+    """
+    steps: List[Dict[str, Any]] = []
+
+    def step(title: str, verdict: str, detail: str, data: Optional[Dict[str, Any]] = None):
+        steps.append({
+            "step": len(steps) + 1,
+            "title": title,
+            "verdict": verdict,          # INFO | PASS | REJECTED | HALTED | LEARNED
+            "detail": detail,
+            "data": data or {},
+            "at": datetime.now(timezone.utc).isoformat(),
+        })
+
+    symbol = req.symbol.upper()
+
+    # 1. Perception on real market data.
+    ctx = alpaca_client.get_market_context(symbol)
+    step("Perception: real market data", "INFO",
+         f"{symbol} at ${ctx.underlying_price}. IV rank {ctx.iv_rank}, realized vol "
+         f"{ctx.realized_vol}%, VRP {ctx.vrp:+.2f} pts, VIX "
+         f"{ctx.vix if ctx.vix is not None else 'UNAVAILABLE'}.",
+         {"data_source": ctx.data_source, "underlying_price": ctx.underlying_price,
+          "iv_rank": ctx.iv_rank, "vrp": ctx.vrp, "vix": ctx.vix,
+          "trend_20d_pct": ctx.trend_20d_pct, "rv_expansion_ratio": ctx.rv_expansion_ratio})
+
+    # 2. Deterministic regime classification.
+    regime = classify_regime_detailed(ctx)
+    step("Regime Engine: classify the environment", "INFO",
+         f"{regime.label} ({regime.regime}), confidence {regime.confidence_pct}%. "
+         f"{regime.description}",
+         {"regime": regime.regime, "label": regime.label,
+          "confidence_pct": regime.confidence_pct, "signals": regime.signals,
+          "data_complete": regime.data_complete})
+
+    # 3. Strategy Arena tournament on real history.
+    arena = strategy_arena.run_tournament(ctx)
+    leaderboard = [
+        {"name": s.name, "structure": s.structure, "eligible": s.eligible, "trades": s.trades,
+         "win_rate_pct": s.win_rate_pct, "expectancy_pct": s.expectancy_pct, "score": s.score}
+        for s in arena.scores
+    ]
+    step("Strategy Arena: strategies compete for the right to trade", "INFO",
+         arena.champion_rationale,
+         {"leaderboard": leaderboard, "champion_id": arena.champion_id,
+          "champion_name": arena.champion_name, "known_bias": arena.known_bias})
+
+    # 4. Reasoning constrained by that evidence.
+    intent = reasoning_agent.propose_intent(ctx, arena=arena)
+    step("Reasoning: propose a structured Intent", "INFO",
+         f"{intent.structure} x{intent.size}, conviction {intent.conviction}. {intent.rationale}",
+         {"intent": intent.model_dump()})
+
+    # 5. The deterministic Risk Kernel gate.
+    decision = validate(intent, ctx.account_state, market_context=ctx)
+    step("Risk Kernel: independent deterministic gate", "PASS" if decision.approved else "REJECTED",
+         (f"APPROVED - all {len(decision.kernel_checks)} checks passed. Max loss "
+          f"${decision.max_loss:,.2f}.") if decision.approved else
+         f"REJECTED - {'; '.join(decision.reasons)}",
+         {"decision": decision.model_dump(by_alias=True)})
+
+    order_id = None
+    if decision.approved and intent.size > 0 and req.execute:
+        order_id = executor.execute_intent(intent, decision)
+        if order_id:
+            self_improving_memory.record_entry(
+                intent_dict=intent.model_dump(), market_ctx=ctx.model_dump(),
+                order_id=order_id, decision_dict=decision.model_dump(),
+            )
+        step("Execution: real multi-leg order on Alpaca paper", "PASS" if order_id else "REJECTED",
+             f"Broker order {order_id}" if order_id else
+             "Broker rejected or no real reference price available - failed closed, no order placed.",
+             {"order_id": order_id})
+    elif decision.approved and intent.size > 0:
+        step("Execution: skipped (demo replay mode)", "INFO",
+             "The trade was approved and would have been submitted. Execution is suppressed so "
+             "this story can be replayed without placing a new order every run.", {})
+
+    snapshot = create_audit_snapshot(ctx, ctx.account_state, intent, decision, order_id=order_id)
+    audit_store.append(snapshot)
+    step("Audit: tamper-evident SHA-256 snapshot", "PASS",
+         f"Snapshot {snapshot.snapshot_id} hashed as {snapshot.hash}.",
+         {"snapshot_id": snapshot.snapshot_id, "hash": snapshot.hash})
+
+    # 6. Independent replay verification of the receipt we just wrote.
+    verification = replay_verifier.verify_decision(snapshot)
+    step("Replay Verifier: recompute the hash independently", "PASS" if verification.integrity else "REJECTED",
+         f"Hash integrity {'VERIFIED' if verification.integrity else 'FAILED'}; "
+         f"rationale claims {'supported' if verification.condition_supported else 'showed a discrepancy'}.",
+         {"verification": verification.model_dump()})
+
+    # 7. Prove the kernel says no: the same account, an intentionally oversized structure.
+    rejection = run_guaranteed_rejection_scenario()
+    rej_decision = rejection["decision"]
+    step("Guaranteed rejection: prove the gate actually bites", "REJECTED",
+         f"An intentionally oversized short-vol structure (size {rejection['intent']['size']}) was "
+         f"REJECTED: {'; '.join(rej_decision.get('reasons', []))}",
+         {"intent": rejection["intent"], "decision": rej_decision})
+
+    # 8. TradeTrap: corrupt the local ledger and let the watchdog catch it.
+    fault_injector.inject_phantom_position("AAPL", 9)
+    recon = reconciliation_engine.run_check()
+    ks = kill_switch.get_status()
+    step("TradeTrap: ledger corruption detected, kill switch engaged",
+         "HALTED" if ks["is_halted"] else "PASS",
+         f"Injected a phantom AAPL position that exists only in local memory. Reconciliation "
+         f"compared believed vs. real broker state and took action: {recon.action_taken}. "
+         f"Kill switch halted: {ks['is_halted']}.",
+         {"reconciliation": recon.model_dump(), "kill_switch": ks})
+
+    # Restore a clean state so the demo is idempotent and the system is left tradable.
+    fault_injector.clear()
+    kill_switch.reset()
+    step("Recovery: fault cleared, kill switch reset", "PASS",
+         "Local ledger corruption cleared and the halt lifted - the system is left in a clean, "
+         "tradable state so this story can be replayed.",
+         {"kill_switch": kill_switch.get_status()})
+
+    # 9. Honest learning state - whatever it actually is.
+    memory = self_improving_memory.get_metrics_summary()
+    step("Learning: measured track record", "LEARNED",
+         f"{memory['closed_trades']} closed trades recorded, win rate {memory['win_rate_pct']}%, "
+         f"net realized P&L ${memory['total_realized_pnl']:,.2f}, "
+         f"{memory['learning_iterations']} learning iterations. Adaptive parameters: "
+         f"VRP entry threshold {memory['parameters']['vrp_entry_threshold']} pts, wing buffer "
+         f"{memory['parameters']['wing_buffer_multiplier']}x.",
+         {"memory": memory})
+
+    return {
+        "symbol": symbol,
+        "executed": bool(order_id),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "steps": steps,
+        "summary": {
+            "regime": regime.label,
+            "champion": arena.champion_name,
+            "intent_structure": intent.structure,
+            "kernel_decision": decision.decision,
+            "order_id": order_id,
+            "audit_hash": snapshot.hash,
+            "hash_verified": verification.integrity,
+        },
     }
 
 # --- AUDIT TRAIL & REPLAY VERIFIER ---

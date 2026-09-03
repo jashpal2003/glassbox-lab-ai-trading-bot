@@ -8,12 +8,12 @@ import os
 import json
 import uuid
 from datetime import datetime, timezone
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from dotenv import load_dotenv
 import requests
 
 from shared.schemas import MarketContext, Intent, OptionLeg
-from reasoning.regime_classifier import classify_regime
+from reasoning.regime_engine import classify_regime, classify_regime_detailed
 
 
 def _snap_legs_to_real_contracts(intent: Intent, ctx: MarketContext) -> Intent:
@@ -76,15 +76,34 @@ class LLMReasoningAgent:
             except Exception as e:
                 print(f"Gemini client initialization warning: {e}")
 
-    def propose_intent(self, ctx: MarketContext, anonymized: bool = False, asset_alias: str = "ASSET_01") -> Intent:
+    def propose_intent(
+        self,
+        ctx: MarketContext,
+        anonymized: bool = False,
+        asset_alias: str = "ASSET_01",
+        arena: Optional[Any] = None,
+    ) -> Intent:
         """
         Generate structured Intent from MarketContext.
         Enforces schema validation and fail-closed pattern with self-improving memory injection.
+
+        `arena` is an optional ArenaResult. When supplied, the Strategy Arena's measured evidence
+        (which structures are eligible in this regime, and how each performed on real historical
+        replay) is injected into the prompt, and the deterministic fallback builds the arena's
+        evidence-backed champion instead of a hardcoded guess. The arena constrains and informs
+        the proposal - it never authorises it. The Risk Kernel still gates the result.
         """
         from reasoning.self_improvement import self_improving_memory
         display_ticker = asset_alias if anonymized else ctx.underlying
         learned_context = self_improving_memory.get_learned_prompt_context() if not anonymized else ""
-        
+
+        # Blindfold runs stay arena-free: the whole point of that experiment is to isolate what
+        # the model does with the raw numbers, so feeding it ranked guidance would contaminate it.
+        arena_context = ""
+        if arena is not None and not anonymized:
+            from reasoning.strategy_arena import strategy_arena
+            arena_context = strategy_arena.build_guidance(arena)
+
         # Prepare context payload for prompt
         context_dict = {
             "underlying": display_ticker,
@@ -95,6 +114,11 @@ class LLMReasoningAgent:
             "vix": ctx.vix,
             "earnings_days": ctx.earnings_days,
             "is_earnings_blackout": ctx.is_earnings_blackout,
+            "trend_20d_pct": ctx.trend_20d_pct,
+            "price_vs_ema20_pct": ctx.price_vs_ema20_pct,
+            "realized_vol_10d": ctx.rv_short,
+            "realized_vol_60d": ctx.rv_long,
+            "vol_expansion_ratio": ctx.rv_expansion_ratio,
             "sample_contracts": [
                 {
                     "symbol": c.symbol if not anonymized else c.symbol.replace(ctx.underlying, asset_alias),
@@ -111,7 +135,11 @@ class LLMReasoningAgent:
             ]
         }
 
-        user_content = f"Market Context:\n{json.dumps(context_dict, indent=2)}\n\n{learned_context}\n\nEmit a single JSON Intent according to the schema."
+        user_content = (
+            f"Market Context:\n{json.dumps(context_dict, indent=2)}\n\n"
+            f"{arena_context}\n\n{learned_context}\n\n"
+            f"Emit a single JSON Intent according to the schema."
+        )
 
         # Attempt 1: Call Primary / Secondary LLM
         raw_response = self._call_llm(user_content)
@@ -130,7 +158,9 @@ class LLMReasoningAgent:
                     return _snap_legs_to_real_contracts(intent_retry, ctx)
 
         # Fail Closed / Deterministic Rule Fallback
-        return _snap_legs_to_real_contracts(self._deterministic_intent_generation(ctx, display_ticker), ctx)
+        return _snap_legs_to_real_contracts(
+            self._deterministic_intent_generation(ctx, display_ticker, arena=arena), ctx
+        )
 
     def _call_llm(self, user_content: str) -> Optional[str]:
         """Calls Gemini API, OpenRouter API, or returns None."""
@@ -201,49 +231,120 @@ class LLMReasoningAgent:
             print(f"Schema validation error: {e}")
             return None
 
-    def _deterministic_intent_generation(self, ctx: MarketContext, display_ticker: str) -> Intent:
+    def _stand_down_intent(self, ctx: MarketContext, display_ticker: str, target_expiry: str,
+                            tags: list, reason: str) -> Intent:
+        """A size-0 Intent: the system's explicit, auditable way of declining to trade."""
+        price = ctx.underlying_price
+        put_short = round((price * 0.98) / 5.0) * 5.0
+        return Intent(
+            intent_id=str(uuid.uuid4()),
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            underlying=display_ticker,
+            structure="credit_spread_put",
+            legs=[
+                OptionLeg(action="sell", type="put", strike=put_short, expiry=target_expiry),
+                OptionLeg(action="buy", type="put", strike=put_short - 5.0, expiry=target_expiry),
+            ],
+            size=0,  # Zero size = Stand down
+            rationale=f"Stand down: {reason}.",
+            conviction=0.0,
+            regime_tags=tags,
+            snapshot_ref=""
+        )
+
+    def _deterministic_intent_generation(
+        self, ctx: MarketContext, display_ticker: str, arena: Optional[Any] = None
+    ) -> Intent:
         """
-        Deterministic, rule-based fallback Intent generator.
-        Produces mathematically sound defined-risk options structures based on IV rank and VRP.
+        Deterministic, rule-based fallback Intent generator - used whenever no LLM is reachable
+        or every LLM response failed schema validation.
+
+        When an ArenaResult is supplied, this builds the arena's evidence-backed champion using
+        the SAME strike-selection math the backtest engine measured that champion with, so the
+        structure actually traded is the structure whose track record was evaluated. Without an
+        arena it falls back to the original IV-rank/VRP rules.
         """
-        regime, tags = classify_regime(ctx)
+        regime_detail = classify_regime_detailed(ctx)
+        tags = regime_detail.tags
         target_expiry = ctx.contracts[0].expiry if ctx.contracts else (datetime.now(timezone.utc).strftime("%Y-%m-%d"))
         price = ctx.underlying_price
-        
-        # Strike calculations around ATM
+
+        # Fail-closed environments. The regime engine already treats a missing VIX, a VIX ceiling
+        # breach and an earnings blackout as EVENT_RISK, so one check covers all three.
+        if regime_detail.regime == "EVENT_RISK":
+            return self._stand_down_intent(
+                ctx, display_ticker, target_expiry, tags,
+                regime_detail.description.split("Classified on: ")[-1].rstrip(".")
+            )
+
+        # --- Arena-driven path: build the champion structure at real strikes. ---
+        if arena is not None and getattr(arena, "champion_id", None):
+            from reasoning.strategy_arena import strategy_arena
+            from perception.backtest_engine import build_structure
+
+            variant = strategy_arena.get_variant(arena.champion_id)
+            champ_score = next((s for s in arena.scores if s.variant_id == arena.champion_id), None)
+            if variant:
+                # Days to expiry from the real contract expiry we are actually going to trade.
+                try:
+                    exp_date = datetime.strptime(target_expiry, "%Y-%m-%d").date()
+                    dte_days = max(1, (exp_date - datetime.now(timezone.utc).date()).days)
+                except Exception:
+                    dte_days = 21
+                t_years = dte_days / 365.0
+                # Use the real observed ATM implied vol where the chain provided one, else the
+                # real realized vol as the documented proxy.
+                atm_iv = None
+                if ctx.contracts:
+                    atm = min(ctx.contracts, key=lambda c: abs(c.strike - price))
+                    atm_iv = atm.implied_volatility / 100.0 if atm.implied_volatility else None
+                iv_frac = atm_iv or max(0.05, ctx.realized_vol / 100.0)
+
+                structure = build_structure(variant.structure, price, t_years, iv_frac, variant.params)
+                if structure is not None:
+                    legs = [
+                        OptionLeg(
+                            action="buy" if sign > 0 else "sell",
+                            type=opt_type,
+                            strike=strike,
+                            expiry=target_expiry,
+                        )
+                        for sign, opt_type, strike in structure.legs
+                    ]
+                    evidence = (
+                        f"score {champ_score.score}/100 over {champ_score.trades} replayed cycles, "
+                        f"win rate {champ_score.win_rate_pct}%, expectancy "
+                        f"{champ_score.expectancy_pct:+.2f}% on risk"
+                        if champ_score else "arena-selected"
+                    )
+                    # Conviction is tied to real measured evidence and regime clarity, not vibes.
+                    conviction = round(
+                        min(0.95, 0.35 + (champ_score.score / 200.0 if champ_score else 0.0)
+                            + (regime_detail.confidence_pct / 400.0)), 2
+                    )
+                    return Intent(
+                        intent_id=str(uuid.uuid4()),
+                        timestamp=datetime.now(timezone.utc).isoformat(),
+                        underlying=display_ticker,
+                        structure=variant.structure,
+                        legs=legs,
+                        size=1,
+                        rationale=(
+                            f"Regime {regime_detail.regime} (IV rank {ctx.iv_rank}, VRP {ctx.vrp:+.1f} pts, "
+                            f"20d trend {ctx.trend_20d_pct if ctx.trend_20d_pct is not None else 'n/a'}%). "
+                            f"Strategy Arena champion '{variant.name}': {evidence}."
+                        ),
+                        conviction=conviction,
+                        regime_tags=tags,
+                        snapshot_ref=""
+                    )
+
+        # --- No arena (or champion unbuildable): original IV-rank/VRP rules. ---
         put_short = round((price * 0.98) / 5.0) * 5.0
         put_long = put_short - 5.0
         call_short = round((price * 1.02) / 5.0) * 5.0
         call_long = call_short + 5.0
-        
-        # Check blackout / VIX kill-switch conditions. A None VIX means the live CBOE fetch
-        # failed - stand down here too (the kernel already fails closed on this independently),
-        # rather than crashing on `None >= 30.0`.
-        vix_unsafe = ctx.vix is None or ctx.vix >= 30.0
-        if ctx.is_earnings_blackout or vix_unsafe:
-            if ctx.is_earnings_blackout:
-                stand_down_reason = "Earnings blackout active"
-            elif ctx.vix is None:
-                stand_down_reason = "Live VIX data unavailable"
-            else:
-                stand_down_reason = "VIX is above 30 limit"
-            return Intent(
-                intent_id=str(uuid.uuid4()),
-                timestamp=datetime.now(timezone.utc).isoformat(),
-                underlying=display_ticker,
-                structure="credit_spread_put",
-                legs=[
-                    OptionLeg(action="sell", type="put", strike=put_short, expiry=target_expiry),
-                    OptionLeg(action="buy", type="put", strike=put_long, expiry=target_expiry)
-                ],
-                size=0,  # Zero size = Stand down
-                rationale=f"Stand down: {stand_down_reason}.",
-                conviction=0.0,
-                regime_tags=tags,
-                snapshot_ref=""
-            )
 
-        # High IV Rank & positive VRP -> Sell Iron Condor
         if ctx.iv_rank >= 50.0 and ctx.vrp > 0:
             return Intent(
                 intent_id=str(uuid.uuid4()),
@@ -262,20 +363,20 @@ class LLMReasoningAgent:
                 regime_tags=tags,
                 snapshot_ref=""
             )
-        else:
-            # Moderate IV rank -> Defined-Risk Put Credit Spread
-            return Intent(
-                intent_id=str(uuid.uuid4()),
-                timestamp=datetime.now(timezone.utc).isoformat(),
-                underlying=display_ticker,
-                structure="credit_spread_put",
-                legs=[
-                    OptionLeg(action="sell", type="put", strike=put_short, expiry=target_expiry),
-                    OptionLeg(action="buy", type="put", strike=put_long, expiry=target_expiry)
-                ],
-                size=1,
-                rationale=f"IV rank {ctx.iv_rank} is moderate; structuring defined-risk put credit spread.",
-                conviction=0.65,
-                regime_tags=tags,
-                snapshot_ref=""
-            )
+
+        # Moderate IV rank -> Defined-Risk Put Credit Spread
+        return Intent(
+            intent_id=str(uuid.uuid4()),
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            underlying=display_ticker,
+            structure="credit_spread_put",
+            legs=[
+                OptionLeg(action="sell", type="put", strike=put_short, expiry=target_expiry),
+                OptionLeg(action="buy", type="put", strike=put_long, expiry=target_expiry)
+            ],
+            size=1,
+            rationale=f"IV rank {ctx.iv_rank} is moderate; structuring defined-risk put credit spread.",
+            conviction=0.65,
+            regime_tags=tags,
+            snapshot_ref=""
+        )

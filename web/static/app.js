@@ -53,6 +53,8 @@ function switchTab(tabId) {
     loadReconciliationLog();
   } else if (tabId === 'blindfold') {
     document.getElementById('blindfold-symbol-label').textContent = getActiveSymbol();
+  } else if (tabId === 'arena') {
+    loadRegimePanel();
   }
 }
 
@@ -1346,4 +1348,282 @@ function renderBlindfoldBatch(data) {
       </div>
     </div>
   `;
+}
+
+// --- STRATEGY ARENA: REGIME ENGINE + TOURNAMENT ---
+const REGIME_COLORS = {
+  HIGH_VOL_RANGE: 'var(--accent-emerald)',
+  HIGH_VOL_TREND: 'var(--accent-cyan)',
+  LOW_VOL_TREND: 'var(--accent-cyan)',
+  LOW_VOL_RANGE: 'var(--text-muted)',
+  VOL_EXPANSION: 'var(--accent-rose)',
+  EVENT_RISK: 'var(--accent-rose)',
+};
+
+const SIGNAL_LABELS = {
+  iv_rank: 'IV Rank (52w proxy)',
+  realized_vol: 'Realized Vol 30d',
+  vrp: 'VRP (IV - RV)',
+  vix: 'VIX (CBOE)',
+  trend_20d_pct: 'Trend, 20 sessions',
+  price_vs_ema20_pct: 'Spot vs EMA(20)',
+  rv_short: 'Realized Vol 10d',
+  rv_long: 'Realized Vol 60d',
+  rv_expansion_ratio: 'Vol expansion (10d/60d)',
+  earnings_days: 'Days to earnings',
+  is_earnings_blackout: 'Earnings blackout',
+};
+
+const SIGNAL_UNITS = {
+  iv_rank: '%', realized_vol: '%', vrp: ' pts', trend_20d_pct: '%',
+  price_vs_ema20_pct: '%', rv_short: '%', rv_long: '%',
+};
+
+function renderRegimePanel(regime) {
+  const badge = document.getElementById('arena-regime-badge');
+  badge.textContent = regime.regime;
+  badge.className = 'card-badge ' +
+    ((regime.regime === 'EVENT_RISK' || regime.regime === 'VOL_EXPANSION') ? 'badge-rose' : 'badge-emerald');
+
+  const label = document.getElementById('arena-regime-label');
+  label.textContent = regime.label;
+  label.style.color = REGIME_COLORS[regime.regime] || 'var(--accent-cyan)';
+
+  document.getElementById('arena-regime-desc').textContent = regime.description;
+  document.getElementById('arena-regime-conf').textContent = regime.confidence_pct + '%';
+  document.getElementById('arena-regime-complete').textContent =
+    regime.data_complete ? '' : 'some signals unavailable - confidence reduced';
+
+  document.getElementById('arena-regime-tags').innerHTML = (regime.tags || [])
+    .map(t => '<span class="badge-tag" style="cursor: default; font-size: 0.65rem;">' + t + '</span>')
+    .join('');
+
+  const rows = Object.entries(regime.signals || {}).map(([key, val]) => {
+    const lbl = SIGNAL_LABELS[key] || key;
+    let shown;
+    if (val === null || val === undefined) {
+      shown = '<span style="color: var(--accent-rose);">UNAVAILABLE</span>';
+    } else if (typeof val === 'boolean') {
+      shown = val ? '<span style="color: var(--accent-rose);">yes</span>' : 'no';
+    } else if (typeof val === 'number') {
+      shown = val + (SIGNAL_UNITS[key] || '');
+    } else {
+      shown = val;
+    }
+    return '<tr><td style="color: var(--text-muted); padding: 0.18rem 0;">' + lbl +
+           '</td><td style="text-align: right; color: #fff;">' + shown + '</td></tr>';
+  }).join('');
+  document.getElementById('arena-regime-signals').innerHTML = '<tbody>' + rows + '</tbody>';
+}
+
+async function loadRegimePanel() {
+  try {
+    const symbol = getActiveSymbol();
+    const res = await fetch(`${API_BASE}/api/regime/${symbol}`);
+    if (!res.ok) return;
+    renderRegimePanel(await res.json());
+  } catch (err) {
+    console.error('Regime load error:', err);
+  }
+}
+
+async function runStrategyArena() {
+  const btn = document.getElementById('btn-arena-run');
+  const symbol = getActiveSymbol();
+  const lookback = parseInt(document.getElementById('arena-lookback-select').value) || 365;
+  if (btn) { btn.disabled = true; btn.textContent = 'Replaying every variant on real history...'; }
+
+  const tbody = document.getElementById('arena-leaderboard-body');
+  tbody.innerHTML = '<tr><td colspan="10" style="text-align:center; color: var(--text-muted); padding: 1.5rem;">' +
+    'Replaying ' + symbol + ' history for every strategy variant...</td></tr>';
+
+  try {
+    const res = await fetch(`${API_BASE}/api/arena/score`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ symbol, lookback_days: lookback, refresh: true })
+    });
+    const data = await res.json();
+    renderRegimePanel(data.regime);
+    renderArenaLeaderboard(data);
+  } catch (err) {
+    tbody.innerHTML = '<tr><td colspan="10" style="color: var(--accent-rose); padding: 1rem;">Arena error: ' + err + '</td></tr>';
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Run Tournament'; }
+  }
+}
+
+function renderArenaLeaderboard(data) {
+  const tbody = document.getElementById('arena-leaderboard-body');
+  const scores = data.scores || [];
+
+  if (!scores.length) {
+    tbody.innerHTML = '<tr><td colspan="10" style="text-align:center; color: var(--text-muted); padding: 1.5rem;">No variants scored.</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = scores.map((s, idx) => {
+    const isChampion = s.variant_id === data.champion_id;
+    const rowBg = isChampion ? 'background: rgba(16,185,129,0.10);' : (s.eligible ? '' : 'opacity: 0.55;');
+    const expColor = s.expectancy_pct >= 0 ? 'var(--accent-emerald)' : 'var(--accent-rose)';
+    const noteHtml = s.note ? '<div style="font-size:0.66rem; color: var(--text-muted);">' + s.note + '</div>' : '';
+    return '<tr style="' + rowBg + '">' +
+      '<td style="font-family: var(--font-mono);">' + (isChampion ? '&#128081;' : (idx + 1)) + '</td>' +
+      '<td style="font-weight: 500;">' + s.name + noteHtml + '</td>' +
+      '<td><span class="' + (s.eligible ? 'check-pass' : 'check-fail') + '">' +
+        (s.eligible ? 'ELIGIBLE' : 'EXCLUDED') + '</span></td>' +
+      '<td style="font-family: var(--font-mono);">' + s.trades + '</td>' +
+      '<td style="font-family: var(--font-mono);">' + s.win_rate_pct + '%</td>' +
+      '<td style="font-family: var(--font-mono); color: ' + expColor + ';">' +
+        (s.expectancy_pct >= 0 ? '+' : '') + s.expectancy_pct + '%</td>' +
+      '<td style="font-family: var(--font-mono); color: var(--accent-rose);">-' + s.max_drawdown_pct + '%</td>' +
+      '<td style="font-family: var(--font-mono);">' + s.sharpe + '</td>' +
+      '<td style="font-family: var(--font-mono);">' + s.deflated_sharpe + '</td>' +
+      '<td style="font-family: var(--font-mono); font-weight: 700; color: ' +
+        (isChampion ? 'var(--accent-emerald)' : '#fff') + ';">' + s.score + '</td>' +
+      '</tr>';
+  }).join('');
+
+  const champBox = document.getElementById('arena-champion-box');
+  champBox.style.display = 'block';
+  const champ = scores.find(s => s.variant_id === data.champion_id);
+  if (champ) {
+    const breakdown = Object.entries(champ.score_breakdown || {})
+      .filter(([k]) => k !== 'sample_confidence')
+      .map(([k, v]) => '<span style="margin-right: 0.9rem;"><span style="color: var(--text-muted);">' +
+        k.replace(/_/g, ' ') + '</span> <strong style="color:#fff; font-family: var(--font-mono);">' + v + '</strong></span>')
+      .join('');
+    champBox.innerHTML =
+      '<div style="background: rgba(16,185,129,0.08); border: 1px solid var(--accent-emerald); border-left: 4px solid var(--accent-emerald); border-radius: 6px; padding: 0.85rem;">' +
+        '<div style="display:flex; justify-content: space-between; align-items:center; margin-bottom: 0.3rem;">' +
+          '<strong style="color: #fff;">&#128081; Champion: ' + champ.name + '</strong>' +
+          '<span class="card-badge badge-emerald">EARNED THE RIGHT TO TRADE</span>' +
+        '</div>' +
+        '<div style="font-size: 0.78rem; color: var(--text-secondary); line-height: 1.5;">' + data.champion_rationale + '</div>' +
+        '<div style="font-size: 0.72rem; margin-top: 0.5rem;">Score contribution: ' + breakdown + '</div>' +
+      '</div>';
+  } else {
+    champBox.innerHTML =
+      '<div style="background: rgba(244,63,94,0.08); border-left: 4px solid var(--accent-rose); border-radius: 6px; padding: 0.85rem;">' +
+        '<strong style="color: #fff;">No champion - standing down</strong>' +
+        '<div style="font-size: 0.78rem; color: var(--text-secondary); margin-top: 0.25rem;">' + data.champion_rationale + '</div>' +
+      '</div>';
+  }
+
+  document.getElementById('arena-methodology').textContent = data.methodology || '';
+  const biasBox = document.getElementById('arena-bias');
+  if (data.known_bias) {
+    biasBox.style.display = 'block';
+    biasBox.innerHTML =
+      '<div style="background: rgba(245,158,11,0.08); border-left: 3px solid #f59e0b; border-radius: 6px; padding: 0.7rem; font-size: 0.72rem; color: var(--text-secondary); line-height: 1.5;">' +
+      '<strong style="color: #fbbf24;">Disclosed methodological bias:</strong> ' + data.known_bias + '</div>';
+  } else {
+    biasBox.style.display = 'none';
+  }
+}
+
+// --- JUDGE DEMO: FULL STORY TIMELINE ---
+const VERDICT_STYLES = {
+  INFO:     { color: 'var(--accent-cyan)',    bg: 'rgba(6,182,212,0.08)',   icon: '&#9679;' },
+  PASS:     { color: 'var(--accent-emerald)', bg: 'rgba(16,185,129,0.08)',  icon: '&#10003;' },
+  REJECTED: { color: 'var(--accent-rose)',    bg: 'rgba(244,63,94,0.08)',   icon: '&#10005;' },
+  HALTED:   { color: 'var(--accent-rose)',    bg: 'rgba(244,63,94,0.14)',   icon: '&#9940;' },
+  LEARNED:  { color: '#c4b5fd',               bg: 'rgba(168,85,247,0.08)',  icon: '&#129504;' },
+};
+
+async function runJudgeDemo() {
+  const btn = document.getElementById('btn-judge-demo');
+  const execute = document.getElementById('judge-demo-execute').checked;
+  const symbol = getActiveSymbol();
+  const timeline = document.getElementById('judge-demo-timeline');
+  const summaryBox = document.getElementById('judge-demo-summary');
+
+  if (execute && !confirm(
+    'This will place a REAL multi-leg options order on your Alpaca paper account for ' + symbol +
+    ' if the Risk Kernel approves it.\n\nPaper money, but a real order. Continue?')) {
+    return;
+  }
+
+  if (btn) { btn.disabled = true; btn.textContent = 'Running the full story...'; }
+  summaryBox.style.display = 'none';
+  timeline.innerHTML = '<div class="glass-panel" style="padding: 1.5rem; text-align: center; color: var(--text-muted);">' +
+    'Running perception, regime, arena, reasoning, kernel, audit, rejection, TradeTrap, learning...</div>';
+
+  try {
+    const res = await fetch(`${API_BASE}/api/demo/story`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ symbol, execute })
+    });
+    const data = await res.json();
+    renderJudgeDemo(data);
+    await refreshSystemStatus();
+    await loadAuditSnapshots();
+  } catch (err) {
+    timeline.innerHTML = '<div class="glass-panel" style="padding: 1.25rem; color: var(--accent-rose);">Demo error: ' + err + '</div>';
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Run Full Story'; }
+  }
+}
+
+function renderJudgeDemo(data) {
+  const s = data.summary || {};
+  const summaryBox = document.getElementById('judge-demo-summary');
+  summaryBox.style.display = 'block';
+  summaryBox.innerHTML =
+    '<div class="glass-panel" style="padding: 1rem;">' +
+      '<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 0.65rem;">' +
+        '<div class="kpi-box"><div class="kpi-title">Regime</div><div class="kpi-number highlight" style="font-size: 0.95rem;">' + (s.regime || '-') + '</div></div>' +
+        '<div class="kpi-box"><div class="kpi-title">Arena Champion</div><div class="kpi-number highlight" style="font-size: 0.8rem;">' + (s.champion || 'none') + '</div></div>' +
+        '<div class="kpi-box"><div class="kpi-title">Kernel Decision</div><div class="kpi-number ' +
+          (s.kernel_decision === 'APPROVED' ? 'positive' : 'negative') + '" style="font-size: 0.95rem;">' + (s.kernel_decision || '-') + '</div></div>' +
+        '<div class="kpi-box"><div class="kpi-title">Broker Order</div><div class="kpi-number highlight" style="font-size: 0.78rem; font-family: var(--font-mono);">' +
+          (s.order_id || 'not submitted') + '</div></div>' +
+        '<div class="kpi-box"><div class="kpi-title">Hash Verified</div><div class="kpi-number ' +
+          (s.hash_verified ? 'positive' : 'negative') + '" style="font-size: 0.95rem;">' + (s.hash_verified ? 'VERIFIED' : 'FAILED') + '</div></div>' +
+      '</div>' +
+    '</div>';
+
+  const steps = data.steps || [];
+  document.getElementById('judge-demo-timeline').innerHTML =
+    '<div class="glass-panel" style="padding: 1.25rem;">' +
+      '<div style="display: flex; flex-direction: column; gap: 0.6rem;">' +
+        steps.map(st => {
+          const v = VERDICT_STYLES[st.verdict] || VERDICT_STYLES.INFO;
+          return '<div style="display: flex; gap: 0.75rem; align-items: flex-start; background: ' + v.bg +
+            '; border-left: 3px solid ' + v.color + '; border-radius: 6px; padding: 0.7rem 0.85rem;">' +
+            '<div style="font-family: var(--font-mono); font-size: 0.78rem; color: ' + v.color +
+              '; font-weight: 700; min-width: 2.4rem;">' + v.icon + ' ' + st.step + '</div>' +
+            '<div style="flex: 1;">' +
+              '<div style="display: flex; justify-content: space-between; align-items: baseline; gap: 0.5rem;">' +
+                '<strong style="font-size: 0.86rem; color: #fff;">' + st.title + '</strong>' +
+                '<span style="font-size: 0.66rem; font-weight: 700; color: ' + v.color + ';">' + st.verdict + '</span>' +
+              '</div>' +
+              '<div style="font-size: 0.78rem; color: var(--text-secondary); margin-top: 0.2rem; line-height: 1.5;">' + st.detail + '</div>' +
+              renderDemoStepExtra(st) +
+            '</div>' +
+          '</div>';
+        }).join('') +
+      '</div>' +
+    '</div>';
+}
+
+function renderDemoStepExtra(st) {
+  const d = st.data || {};
+  if (d.leaderboard) {
+    return '<div style="margin-top: 0.45rem; font-family: var(--font-mono); font-size: 0.68rem; color: var(--text-muted);">' +
+      d.leaderboard.map(l => (l.eligible ? '&#9679;' : '&#9675;') + ' ' + l.name + ' - score ' + l.score +
+        ', ' + l.trades + ' cycles, win ' + l.win_rate_pct + '%').join('<br>') + '</div>';
+  }
+  if (d.decision && d.decision.kernel_checks) {
+    const failed = d.decision.kernel_checks.filter(c => !c.pass);
+    const shown = failed.length ? failed : d.decision.kernel_checks.slice(0, 4);
+    return '<div style="margin-top: 0.45rem; font-family: var(--font-mono); font-size: 0.68rem; color: var(--text-muted);">' +
+      shown.map(c => (c.pass ? '&#10003;' : '&#10005;') + ' ' + c.check + ': ' + c.value + ' vs limit ' + c.limit).join('<br>') +
+      '</div>';
+  }
+  if (d.hash) {
+    return '<div style="margin-top: 0.35rem; font-family: var(--font-mono); font-size: 0.66rem; color: var(--accent-cyan); word-break: break-all;">' + d.hash + '</div>';
+  }
+  return '';
 }
