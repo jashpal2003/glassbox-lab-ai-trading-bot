@@ -26,6 +26,7 @@ without keys.
 import os
 import csv
 import io
+import re
 import threading
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -64,11 +65,53 @@ DAILY_CLOSES_TTL_SECONDS = 900
 # passes force_refresh=True.
 ACCOUNT_STATE_TTL_SECONDS = 5
 MARKET_CLOCK_TTL_SECONDS = 60
+# The tradable-asset list is ~14k rows and changes on listing events, not intraday.
+ASSET_LIST_TTL_SECONDS = 3600
+
+
+class MarketDataUnavailable(Exception):
+    """
+    Raised when broker credentials ARE configured but real market data for a symbol cannot
+    be obtained - almost always because the symbol does not exist.
+
+    This exists so the request fails loudly instead of falling through to the simulated
+    feed. The simulated feed is for running the app with NO credentials; using it to answer
+    a lookup for a nonexistent ticker invents a plausible price for a company that isn't
+    real, which is precisely the failure mode this whole system is built to prevent.
+    """
+
+    def __init__(self, symbol: str, reason: str, suggestions: Optional[List[Dict[str, str]]] = None):
+        self.symbol = symbol
+        self.reason = reason
+        self.suggestions = suggestions or []
+        super().__init__(f"No real market data for '{symbol}': {reason}")
 
 # Contracts whose strike is off the standard grid (SPY lists 1-point strikes alongside the
 # 5-point grid) are never selected by build_structure, which snaps to the grid - carrying them
 # just inflates the payload and the browser's render cost.
 MAX_CHAIN_CONTRACTS = 160
+
+
+# Household brand names that differ from the registered company name in the asset master, so
+# "google" resolves to Alphabet. This only maps text -> a REAL ticker, which is then validated
+# against live market data exactly like any other symbol; it never invents data.
+SYMBOL_ALIASES: Dict[str, str] = {
+    "google": "GOOGL",
+    "alphabet": "GOOGL",
+    "facebook": "META",
+    "instagram": "META",
+    "whatsapp": "META",
+    "jp morgan": "JPM",
+    "jpmorgan": "JPM",
+    "berkshire": "BRK.B",
+    "s&p": "SPY",
+    "s and p": "SPY",
+    "sp500": "SPY",
+    "s&p 500": "SPY",
+    "nasdaq": "QQQ",
+    "russell": "IWM",
+    "dow": "DIA",
+}
 
 
 def _signed_qty(position) -> float:
@@ -102,6 +145,7 @@ class AlpacaClient:
         self._ctx_cache: Dict[str, Tuple[Any, datetime]] = {}
         self._account_cache: Optional[Tuple[Any, datetime]] = None
         self._clock_cache: Optional[Tuple[Dict[str, Any], datetime]] = None
+        self._asset_cache: Optional[Tuple[List[Dict[str, str]], datetime]] = None
         self._closes_cache: Dict[Tuple[str, int], Tuple[List[Tuple[datetime, float]], datetime]] = {}
         self._cache_lock = threading.Lock()
 
@@ -123,6 +167,123 @@ class AlpacaClient:
             except Exception as e:
                 print(f"Warning: Alpaca client initialization failed: {e}. Using simulated feed.")
                 self.has_real_client = False
+
+    # ------------------------------------------------------------------
+    # Symbol resolution / search
+    # ------------------------------------------------------------------
+
+    def _get_asset_list(self) -> List[Dict[str, str]]:
+        """All active, tradable US equities as {symbol, name}, cached for an hour."""
+        if self._asset_cache:
+            cached, cached_at = self._asset_cache
+            if (datetime.now(timezone.utc) - cached_at).total_seconds() < ASSET_LIST_TTL_SECONDS:
+                return cached
+        if not (self.has_real_client and self.trading_client):
+            return []
+        try:
+            from alpaca.trading.requests import GetAssetsRequest
+            from alpaca.trading.enums import AssetStatus, AssetClass
+            assets = self.trading_client.get_all_assets(
+                GetAssetsRequest(status=AssetStatus.ACTIVE, asset_class=AssetClass.US_EQUITY)
+            )
+            rows = [
+                {"symbol": a.symbol, "name": a.name or ""}
+                for a in assets if a.tradable and a.symbol
+            ]
+            with self._cache_lock:
+                self._asset_cache = (rows, datetime.now(timezone.utc))
+            return rows
+        except Exception as e:
+            print(f"[ASSET LIST WARNING] {e}")
+            return []
+
+    @staticmethod
+    def _normalize(text: str) -> str:
+        """Lowercase and collapse punctuation to spaces so 'coca cola' matches 'Coca-Cola'."""
+        return re.sub(r"[^a-z0-9]+", " ", (text or "").lower()).strip()
+
+    def search_symbols(self, query: str, limit: int = 8) -> List[Dict[str, str]]:
+        """
+        Resolve free text to real tradable symbols, matching ticker AND company name against
+        Alpaca's real asset master. This is what lets someone type "microsoft" - or "microsft",
+        or "coca cola" - and get the right ticker, instead of the app silently inventing a price
+        for something that does not exist.
+
+        Results are grouped into relevance tiers and only sorted WITHIN a tier (shorter symbols
+        first, since the primary listing is almost always shorter than the leveraged ETFs and
+        yield products that share its name). Sorting across tiers would let a 3-letter incidental
+        substring match outrank an exact company-name hit.
+        """
+        raw = (query or "").strip()
+        q = self._normalize(raw)
+        if not q:
+            return []
+        assets = self._get_asset_list()
+        if not assets:
+            return []
+
+        q_nospace = q.replace(" ", "")
+        alias_target = SYMBOL_ALIASES.get(q) or SYMBOL_ALIASES.get(q_nospace)
+        tiers: List[List[Dict[str, str]]] = [[] for _ in range(6)]
+
+        for a in assets:
+            sym = a["symbol"].lower()
+            name = self._normalize(a["name"])
+            # Space-insensitive too, so "jp morgan" finds "JPMorgan Chase".
+            name_nospace = name.replace(" ", "")
+            words = name.split()
+
+            if alias_target and a["symbol"].upper() == alias_target:
+                tiers[0].append(a)
+            elif sym == q_nospace or name == q:
+                tiers[1].append(a)
+            elif sym.startswith(q_nospace):
+                tiers[2].append(a)
+            elif name.startswith(q) or name_nospace.startswith(q_nospace):
+                tiers[3].append(a)
+            elif any(w.startswith(q) for w in words):
+                tiers[4].append(a)
+            elif q in name or q_nospace in name_nospace:
+                tiers[5].append(a)
+
+        ranked: List[Dict[str, str]] = []
+        for tier in tiers:
+            tier.sort(key=lambda a: (len(a["symbol"]), a["symbol"]))
+            ranked.extend(tier)
+
+        # Nothing matched literally - fall back to fuzzy, for genuine typos like "microsft".
+        if not ranked and len(q_nospace) >= 3:
+            import difflib
+            by_symbol = {a["symbol"]: a for a in assets}
+            close = difflib.get_close_matches(q_nospace.upper(), list(by_symbol), n=limit, cutoff=0.7)
+            ranked = [by_symbol[c] for c in close]
+
+            scored = []
+            for a in assets:
+                name = self._normalize(a["name"])
+                r = max(
+                    difflib.SequenceMatcher(None, q, name).ratio(),
+                    difflib.SequenceMatcher(None, q, name.split(" ")[0]).ratio() if name else 0.0,
+                )
+                if r > 0.72:
+                    scored.append((r, a))
+            scored.sort(key=lambda x: (-x[0], len(x[1]["symbol"])))
+            for _, a in scored:
+                if a not in ranked:
+                    ranked.append(a)
+
+        # De-duplicate while preserving tier order.
+        seen, out = set(), []
+        for a in ranked:
+            if a["symbol"] not in seen:
+                seen.add(a["symbol"])
+                out.append(a)
+        return out[:limit]
+
+    def resolve_symbol(self, query: str) -> Optional[str]:
+        """Best real symbol for free text, or None when nothing plausible matches."""
+        hits = self.search_symbols(query, limit=1)
+        return hits[0]["symbol"] if hits else None
 
     # ------------------------------------------------------------------
     # Account state
@@ -257,11 +418,22 @@ class AlpacaClient:
 
         now_iso = datetime.now(timezone.utc).isoformat()
         if self.has_real_client:
+            # Credentials ARE configured, so a failure here means the data genuinely isn't
+            # available - nearly always a symbol that doesn't exist. Fail loudly. Falling back to
+            # the simulated feed would answer "MICROSFT" with a confident invented price for a
+            # company that isn't real, which is the exact failure mode this system exists to
+            # prevent. The simulated feed is only for running with NO credentials at all.
             try:
                 ctx = self._get_real_market_context(ticker, now_iso)
+            except MarketDataUnavailable:
+                raise
             except Exception as e:
-                print(f"[MARKET DATA WARNING] Real data path failed for {ticker}: {e}. Falling back to simulated feed.")
-                ctx = self._get_simulated_market_context(ticker, now_iso)
+                print(f"[MARKET DATA] No real data for {ticker}: {e}")
+                raise MarketDataUnavailable(
+                    ticker,
+                    str(e),
+                    suggestions=self.search_symbols(ticker, limit=5),
+                ) from e
         else:
             ctx = self._get_simulated_market_context(ticker, now_iso)
 
@@ -651,10 +823,16 @@ class AlpacaClient:
     def get_ohlcv_bars(self, symbol: str, timeframe: str = "1M") -> List[Dict[str, Any]]:
         symbol = symbol.upper()
         if self.has_real_client:
+            # Same rule as get_market_context: with credentials configured, no real bars means
+            # the symbol isn't real. Drawing a plausible random walk for a nonexistent ticker
+            # would be a fabricated chart.
             try:
                 return self._get_real_ohlcv_bars(symbol, timeframe)
             except Exception as e:
-                print(f"[CHART DATA WARNING] Real bars fetch failed for {symbol}: {e}. Falling back to simulated bars.")
+                print(f"[CHART DATA] No real bars for {symbol}: {e}")
+                raise MarketDataUnavailable(
+                    symbol, str(e), suggestions=self.search_symbols(symbol, limit=5)
+                ) from e
         return self._get_simulated_ohlcv_bars(symbol, timeframe)
 
     def _get_real_ohlcv_bars(self, symbol: str, timeframe: str) -> List[Dict[str, Any]]:

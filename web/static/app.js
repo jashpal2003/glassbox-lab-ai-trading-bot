@@ -32,6 +32,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Setup interactive chart mouse events
   setupChartHoverTooltip();
+  initSymbolSearch();
 });
 
 // --- TAB SWITCHING ---
@@ -46,6 +47,11 @@ function switchTab(tabId) {
   if (pane) pane.classList.add('active');
 
   if (tabId === 'terminal') {
+    // Always refresh, not just the candlestick chart. Resolving a symbol from another tab
+    // (e.g. typing "microsoft" straight into Studio's Execute button) previously left the
+    // Terminal's price/KPIs/options chain showing the PREVIOUS symbol's numbers under the
+    // new symbol's label until a manual re-scan - a real correctness bug, not cosmetic.
+    loadMarketData();
     setTimeout(loadCandleChart, 50);
   } else if (tabId === 'memory') {
     loadSelfImprovingMemory();
@@ -68,6 +74,43 @@ function getActiveSymbol() {
   return currentSymbol;
 }
 
+/**
+ * The single gate every action button must pass through before hitting a symbol-scoped
+ * endpoint. Fixes the class of bug where typing "tesla" and clicking "Generate & Execute"
+ * (instead of "Scan" first) sent the literal, unresolved text and 404'd.
+ *
+ * - If the input already matches the last successfully resolved symbol, returns it with no
+ *   network round trip.
+ * - Otherwise resolves the free text against the real asset master, commits it on success
+ *   (updates currentSymbol, the input field, and every synced label), and on failure warns
+ *   and falls back to the last known-good symbol rather than sending garbage to the server.
+ */
+async function resolveActiveSymbol() {
+  const input = document.getElementById('custom-ticker-input');
+  const raw = (input?.value || currentSymbol || 'SPY').trim();
+  if (!raw) return currentSymbol;
+
+  const candidate = raw.toUpperCase();
+  if (candidate === currentSymbol) return currentSymbol;
+
+  const resolved = await resolveSymbolQuery(raw);
+  if (!resolved) {
+    toastWarn(`"${raw}" doesn't match a real tradable symbol - using ${currentSymbol} instead.`,
+              'Unknown symbol');
+    if (input) input.value = currentSymbol;
+    markSymbolInvalid(true);
+    return currentSymbol;
+  }
+
+  currentSymbol = resolved;
+  if (input) input.value = resolved;
+  markSymbolInvalid(false);
+  syncSymbolLabels(resolved);
+  document.querySelectorAll('.badge-tag').forEach(b =>
+    b.classList.toggle('active-tag', b.textContent === resolved));
+  return resolved;
+}
+
 function selectQuickTicker(sym) {
   const customInput = document.getElementById('custom-ticker-input');
   if (customInput) customInput.value = sym;
@@ -77,14 +120,91 @@ function selectQuickTicker(sym) {
     b.classList.toggle('active-tag', b.textContent === sym);
   });
 
+  markSymbolInvalid(false);
+  hideSuggestions();
   loadMarketData();
   loadCandleChart();
+  syncSymbolLabels(sym);
 }
 
-function applyCustomTicker() {
-  currentSymbol = getActiveSymbol();
-  loadMarketData();
-  loadCandleChart();
+async function applyCustomTicker() {
+  const input = document.getElementById('custom-ticker-input');
+  const raw = (input?.value || '').trim();
+  if (!raw) { toastWarn('Enter a ticker or company name first.', 'Nothing to scan'); return; }
+
+  const btn = document.getElementById('btn-scan');
+  const restore = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = '...'; }
+  hideSuggestions();
+
+  try {
+    // Free text ("microsoft", "coca cola") is resolved against Alpaca's real asset master
+    // before we ask for market data, so a company name works as well as a ticker.
+    let symbol = raw.toUpperCase();
+    if (!/^[A-Z.\-]{1,6}$/.test(symbol) || raw.includes(' ')) {
+      const found = await resolveSymbolQuery(raw);
+      if (!found) {
+        markSymbolInvalid(true);
+        toastWarn(`Nothing matched "${raw}". Try a ticker (MSFT) or a company name (Microsoft).`,
+                  'No matching symbol');
+        return;
+      }
+      symbol = found;
+    }
+
+    // Probe the symbol BEFORE committing it anywhere. Previously a 404 still fell through to
+    // syncSymbolLabels, leaving the chart captioned "MSFTT" above MSFT's price.
+    const previousSymbol = currentSymbol;
+    input.value = symbol;
+    currentSymbol = symbol;
+
+    const ok = await loadMarketData();
+    if (!ok) {
+      currentSymbol = previousSymbol;
+      input.value = previousSymbol;
+      markSymbolInvalid(true);
+      return;
+    }
+
+    markSymbolInvalid(false);
+    document.querySelectorAll('.badge-tag').forEach(b =>
+      b.classList.toggle('active-tag', b.textContent === symbol));
+    await loadCandleChart();
+    syncSymbolLabels(symbol);
+  } catch (err) {
+    toastError(err.message || err, 'Scan failed');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = restore || 'Scan'; }
+  }
+}
+
+/** Best real symbol for free text, via the server's asset-master search. */
+async function resolveSymbolQuery(query) {
+  try {
+    const data = await apiFetch(`/api/symbols/search?q=${encodeURIComponent(query)}&limit=1`,
+                                {}, { timeoutMs: 30000 });
+    return (data.results && data.results[0] && data.results[0].symbol) || null;
+  } catch (err) {
+    console.error('symbol search failed', err);
+    return null;
+  }
+}
+
+/** Keep every symbol-bearing label in sync after a scan, on whichever tab is open. */
+function syncSymbolLabels(symbol) {
+  const act1 = document.getElementById('btn-act1-run');
+  if (act1) act1.textContent = `▶ Generate & Execute Strategy (${symbol})`;
+  const bf = document.getElementById('blindfold-symbol-label');
+  if (bf) bf.textContent = symbol;
+  const chartSym = document.getElementById('chart-symbol-header');
+  if (chartSym) chartSym.textContent = symbol;
+  const btInput = document.getElementById('backtest-tab-ticker-input');
+  if (btInput) btInput.value = symbol;
+}
+
+function markSymbolInvalid(isInvalid) {
+  const input = document.getElementById('custom-ticker-input');
+  if (input) input.classList.toggle('invalid', !!isInvalid);
 }
 
 function triggerStudioForCurrentSymbol() {
@@ -123,7 +243,27 @@ async function loadMarketData() {
   const symbol = getActiveSymbol();
   try {
     const res = await fetch(`${API_BASE}/api/market/${symbol}`);
-    if (!res.ok) return;
+    if (!res.ok) {
+      // A 404 here means the symbol isn't real. Say so loudly - the backend deliberately
+      // refuses to answer with an invented price, so the UI must not fail silently either.
+      let payload = null;
+      try { payload = await res.json(); } catch (_) {}
+      if (res.status === 404 && payload) {
+        const sugg = (payload.suggestions || []).slice(0, 4);
+        markSymbolInvalid(true);
+        toast(
+          sugg.length
+            ? `No market data for "${symbol}". Try: ${sugg.map(x => x.symbol).join(', ')}`
+            : `No market data for "${symbol}". Check the ticker and try again.`,
+          { type: 'warn', title: 'Symbol not found', timeout: 9000 }
+        );
+        if (sugg.length) showSuggestions(sugg);
+      } else {
+        toastError(`${res.status} ${(payload && payload.detail) || res.statusText}`, 'Market data failed');
+      }
+      return false;
+    }
+    markSymbolInvalid(false);
     const ctx = await res.json();
     currentMarketContext = ctx;
 
@@ -144,9 +284,12 @@ async function loadMarketData() {
     // Load options payoff diagram, volatility smile, and options chain table
     loadPayoffAndSmileData(symbol);
     renderOptionsChain(ctx.contracts, ctx.underlying_price);
+    return true;
 
   } catch (err) {
     console.error('Error fetching market context:', err);
+    toastError(err.message || err, 'Could not load market data');
+    return false;
   }
 }
 
@@ -834,7 +977,7 @@ async function sendCopilotMessage() {
     const res = await fetch(`${API_BASE}/api/agent/chat`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message, symbol: getActiveSymbol() })
+      body: JSON.stringify({ message, symbol: await resolveActiveSymbol() })
     });
     const data = await res.json();
     botMsg.innerHTML = `<strong>GlassBox AI Copilot:</strong><p style="margin-top: 0.2rem; white-space: pre-wrap;">${data.reply}</p>`;
@@ -846,7 +989,7 @@ async function sendCopilotMessage() {
 
 // --- STRATEGY EXECUTION PIPELINE ---
 async function runAct1Pipeline() {
-  const symbol = getActiveSymbol();
+  const symbol = await resolveActiveSymbol();
   const runBtn = document.getElementById('btn-act1-run');
   if (runBtn) {
     runBtn.disabled = true;
@@ -1067,17 +1210,37 @@ function closeConfigModal() {
 
 // --- QUANT BACKTEST TAB ---
 async function executeBacktestTabRun() {
-  const symbol = document.getElementById('backtest-tab-ticker-input').value.trim().toUpperCase() || 'SPY';
+  const btInput = document.getElementById('backtest-tab-ticker-input');
+  const raw = btInput.value.trim() || 'SPY';
   const days = parseInt(document.getElementById('backtest-tab-days-select').value) || 180;
   const container = document.getElementById('backtest-tab-results-container');
+  const btn = document.getElementById('btn-backtest-run');
 
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Running...'; }
   try {
-    const res = await fetch(`${API_BASE}/api/backtest/run`, {
+    // Same free-text resolution as everywhere else: "tesla" must find TSLA here too.
+    let symbol = raw.toUpperCase();
+    if (!/^[A-Z.\-]{1,6}$/.test(symbol) || raw.includes(' ')) {
+      const found = await resolveSymbolQuery(raw);
+      if (!found) {
+        toastWarn(`Nothing matched "${raw}". Try a ticker (SPY) or a company name.`, 'No matching symbol');
+        return;
+      }
+      symbol = found;
+    }
+    btInput.value = symbol;
+    currentSymbol = symbol;
+    syncSymbolLabels(symbol);
+
+    const data = await apiFetch('/api/backtest/run', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ symbol, days, strategy: 'iron_condor', trials: 12 })
     });
-    const data = await res.json();
+
+    if (data.data_source === 'unavailable') {
+      toastWarn(data.methodology || `No historical data available for ${symbol}.`, 'Backtest unavailable');
+    }
 
     container.style.display = 'block';
     document.getElementById('tab-bt-win-rate').textContent = `${data.win_rate_pct}%`;
@@ -1090,6 +1253,8 @@ async function executeBacktestTabRun() {
     drawBacktestTabEquityCurve(data.equity_curve);
   } catch (err) {
     toastError(err.message || err, 'Backtest failed');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '▶ Run Backtest Replay'; }
   }
 }
 
@@ -1246,7 +1411,7 @@ async function loadReconciliationLog() {
 
 // --- ACT 3: BLINDFOLD VRP EXPERIMENT ---
 async function runBlindfoldSingle() {
-  const symbol = getActiveSymbol();
+  const symbol = await resolveActiveSymbol();
   const label = document.getElementById('blindfold-symbol-label');
   if (label) label.textContent = symbol;
 
@@ -1446,7 +1611,7 @@ async function loadRegimePanel() {
 
 async function runStrategyArena() {
   const btn = document.getElementById('btn-arena-run');
-  const symbol = getActiveSymbol();
+  const symbol = await resolveActiveSymbol();
   const lookback = parseInt(document.getElementById('arena-lookback-select').value) || 365;
   if (btn) { btn.disabled = true; btn.textContent = 'Replaying every variant on real history...'; }
 
@@ -1551,7 +1716,7 @@ const VERDICT_STYLES = {
 async function runJudgeDemo() {
   const btn = document.getElementById('btn-judge-demo');
   const execute = document.getElementById('judge-demo-execute').checked;
-  const symbol = getActiveSymbol();
+  const symbol = await resolveActiveSymbol();
   const timeline = document.getElementById('judge-demo-timeline');
   const summaryBox = document.getElementById('judge-demo-summary');
 
@@ -1835,4 +2000,138 @@ function renderStudioArenaContext(data) {
         (arena.champion_rationale || '') +
       '</div>' +
     '</div>';
+}
+
+/* ==========================================================================
+   SYMBOL AUTOCOMPLETE
+   Typing a company name has to find the real ticker. Every suggestion here comes from
+   Alpaca's real tradable-asset master - nothing is guessed, and an unmatched query is
+   reported rather than answered.
+   ========================================================================== */
+
+let symbolSearchTimer = null;
+let symbolSearchSeq = 0;
+let activeSuggestionIndex = -1;
+let currentSuggestions = [];
+
+function suggestionBox() { return document.getElementById('symbol-suggestions'); }
+
+function hideSuggestions() {
+  const box = suggestionBox();
+  if (box) box.hidden = true;
+  const input = document.getElementById('custom-ticker-input');
+  if (input) input.setAttribute('aria-expanded', 'false');
+  activeSuggestionIndex = -1;
+  currentSuggestions = [];
+}
+
+function showSearching() {
+  const box = suggestionBox();
+  if (!box) return;
+  box.innerHTML = '<div class="symbol-empty">Searching…</div>';
+  box.hidden = false;
+  currentSuggestions = [];
+  activeSuggestionIndex = -1;
+}
+
+function showSuggestions(results) {
+  const box = suggestionBox();
+  if (!box) return;
+  currentSuggestions = results || [];
+  activeSuggestionIndex = -1;
+
+  if (!currentSuggestions.length) {
+    box.innerHTML = '<div class="symbol-empty">No matching tradable symbol.</div>';
+    box.hidden = false;
+    return;
+  }
+
+  box.innerHTML = currentSuggestions.map((r, i) =>
+    `<div class="symbol-option" role="option" data-index="${i}" data-symbol="${r.symbol}">
+       <span class="sym">${r.symbol}</span><span class="nm">${escapeHtml(r.name || '')}</span>
+     </div>`).join('');
+
+  box.querySelectorAll('.symbol-option').forEach(el => {
+    el.addEventListener('mousedown', ev => {   // mousedown fires before input blur
+      ev.preventDefault();
+      pickSuggestion(el.dataset.symbol);
+    });
+  });
+
+  box.hidden = false;
+  const input = document.getElementById('custom-ticker-input');
+  if (input) input.setAttribute('aria-expanded', 'true');
+}
+
+function escapeHtml(str) {
+  const d = document.createElement('div');
+  d.textContent = str;
+  return d.innerHTML;
+}
+
+function pickSuggestion(symbol) {
+  const input = document.getElementById('custom-ticker-input');
+  if (input) input.value = symbol;
+  hideSuggestions();
+  applyCustomTicker();
+}
+
+function highlightSuggestion(delta) {
+  if (!currentSuggestions.length) return;
+  activeSuggestionIndex =
+    (activeSuggestionIndex + delta + currentSuggestions.length) % currentSuggestions.length;
+  suggestionBox().querySelectorAll('.symbol-option').forEach((el, i) =>
+    el.classList.toggle('active', i === activeSuggestionIndex));
+}
+
+async function onSymbolInput(value) {
+  const q = (value || '').trim();
+  if (q.length < 1) { hideSuggestions(); return; }
+
+  const seq = ++symbolSearchSeq;
+  try {
+    const data = await apiFetch(`/api/symbols/search?q=${encodeURIComponent(q)}&limit=8`,
+                                {}, { timeoutMs: 30000 });
+    if (seq !== symbolSearchSeq) return;          // a newer keystroke already won
+    if (!data.searchable) { hideSuggestions(); return; }
+    showSuggestions(data.results);
+  } catch (err) {
+    console.error('symbol search error', err);
+    hideSuggestions();
+  }
+}
+
+function initSymbolSearch() {
+  const input = document.getElementById('custom-ticker-input');
+  if (!input) return;
+
+  input.addEventListener('input', () => {
+    markSymbolInvalid(false);
+    clearTimeout(symbolSearchTimer);
+    const v = input.value;
+    // Invalidate stale results immediately: suggestions for a previous query are worse than
+    // no suggestions, because they look like answers to what was just typed.
+    symbolSearchSeq++;
+    if (v.trim()) showSearching(); else hideSuggestions();
+    symbolSearchTimer = setTimeout(() => onSymbolInput(v), 220);   // debounce
+  });
+
+  input.addEventListener('keydown', (e) => {
+    const box = suggestionBox();
+    const open = box && !box.hidden;
+    if (e.key === 'ArrowDown' && open) { e.preventDefault(); highlightSuggestion(1); }
+    else if (e.key === 'ArrowUp' && open) { e.preventDefault(); highlightSuggestion(-1); }
+    else if (e.key === 'Enter') {
+      e.preventDefault();
+      if (open && activeSuggestionIndex >= 0) pickSuggestion(currentSuggestions[activeSuggestionIndex].symbol);
+      else applyCustomTicker();
+    } else if (e.key === 'Escape') {
+      hideSuggestions();
+    }
+  });
+
+  input.addEventListener('blur', () => setTimeout(hideSuggestions, 120));
+  document.addEventListener('click', (e) => {
+    if (!e.target.closest('.symbol-search')) hideSuggestions();
+  });
 }

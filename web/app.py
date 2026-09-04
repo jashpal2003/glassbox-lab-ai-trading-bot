@@ -21,7 +21,7 @@ from shared.schemas import (
     Intent, OptionLeg, MarketContext, AccountState, KernelDecision, OptionContractQuote,
     AuditSnapshot, ReconciliationEvent, ReplayVerificationResult
 )
-from perception.alpaca_client import AlpacaClient
+from perception.alpaca_client import AlpacaClient, MarketDataUnavailable
 from reasoning.agent import LLMReasoningAgent
 from reasoning.blindfold import BlindfoldExperiment
 from reasoning.regime_engine import classify_regime_detailed
@@ -236,6 +236,45 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# --- SYMBOL RESOLUTION ---------------------------------------------------------------
+# Turning an unknown ticker into a clear 404 with real suggestions, rather than a confident
+# invented price, is the whole point of MarketDataUnavailable. One handler covers every endpoint.
+
+@app.exception_handler(MarketDataUnavailable)
+async def market_data_unavailable_handler(request, exc: MarketDataUnavailable):
+    from fastapi.responses import JSONResponse
+    suggestion_text = ""
+    if exc.suggestions:
+        listed = ", ".join(f"{s['symbol']} ({s['name']})" for s in exc.suggestions[:3])
+        suggestion_text = f" Did you mean: {listed}?"
+    return JSONResponse(
+        status_code=404,
+        content={
+            "error": "symbol_not_found",
+            "symbol": exc.symbol,
+            "detail": f"No real market data available for '{exc.symbol}'.{suggestion_text}",
+            "reason": exc.reason,
+            "suggestions": exc.suggestions,
+        },
+    )
+
+
+@app.get("/api/symbols/search")
+def search_symbols(q: str = "", limit: int = 8):
+    """
+    Resolve free text to real tradable symbols, matching ticker AND company name against
+    Alpaca's real asset master. Powers the dashboard's ticker autocomplete, so typing
+    "microsoft" finds MSFT instead of the app pretending an invalid ticker is tradable.
+    """
+    results = alpaca_client.search_symbols(q, limit=max(1, min(limit, 25)))
+    return {
+        "query": q,
+        "count": len(results),
+        "results": results,
+        "searchable": bool(alpaca_client.has_real_client),
+    }
+
 
 # --- SYSTEM & STATUS ENDPOINTS ---
 

@@ -76,9 +76,15 @@
     <div class="terminal-quick-actions">
       <!-- Quick Ticker Search -->
       <div style="display: flex; gap: 0.35rem; align-items: center;">
-        <input type="text" id="custom-ticker-input" placeholder="Type ANY ticker (e.g. NVDA, MSFT)..." value="SPY" 
-               style="background: rgba(255,255,255,0.08); color: #fff; border: 1px solid var(--border-card); border-radius: 4px; padding: 0.3rem 0.6rem; font-family: var(--font-mono); font-size: 0.8rem; width: 140px; text-transform: uppercase;">
-        <button class="btn btn-secondary" style="padding: 0.3rem 0.6rem; font-size: 0.78rem;" onclick="applyCustomTicker()">Scan</button>
+        <div class="symbol-search">
+          <input type="text" id="custom-ticker-input"
+                 placeholder="Ticker or company name..." value="SPY"
+                 autocomplete="off" role="combobox" aria-expanded="false"
+                 aria-controls="symbol-suggestions" aria-autocomplete="list"
+                 aria-label="Search by ticker symbol or company name">
+          <div id="symbol-suggestions" class="symbol-suggestions" role="listbox" hidden></div>
+        </div>
+        <button class="btn btn-secondary" id="btn-scan" style="padding: 0.3rem 0.6rem; font-size: 0.78rem;" onclick="applyCustomTicker()">Scan</button>
       </div>
 
       <!-- Autonomous Trader Button -->
@@ -622,7 +628,7 @@
             <option value="180" selected>180 Days (Semi-Annual)</option>
             <option value="365">365 Days (Full Year)</option>
           </select>
-          <button class="btn btn-primary" onclick="executeBacktestTabRun()">▶ Run Backtest Replay</button>
+          <button class="btn btn-primary" id="btn-backtest-run" onclick="executeBacktestTabRun()">▶ Run Backtest Replay</button>
         </div>
 
         <div id="backtest-tab-results-container" style="display: none;">
