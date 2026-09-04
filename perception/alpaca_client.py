@@ -58,6 +58,12 @@ VIX_CACHE_TTL_SECONDS = 900
 # small enough that quoted prices stay current for a human reading a dashboard.
 MARKET_CONTEXT_TTL_SECONDS = 20
 DAILY_CLOSES_TTL_SECONDS = 900
+# /api/status is polled every few seconds by the dashboard and each rebuild costs an
+# account fetch plus a positions fetch plus an option-snapshot call for portfolio Greeks.
+# Anything that must see the true, uncached broker state (the reconciliation watchdog)
+# passes force_refresh=True.
+ACCOUNT_STATE_TTL_SECONDS = 5
+MARKET_CLOCK_TTL_SECONDS = 60
 
 # Contracts whose strike is off the standard grid (SPY lists 1-point strikes alongside the
 # 5-point grid) are never selected by build_structure, which snaps to the grid - carrying them
@@ -94,6 +100,8 @@ class AlpacaClient:
 
         self._vix_cache: Optional[Tuple[float, datetime]] = None
         self._ctx_cache: Dict[str, Tuple[Any, datetime]] = {}
+        self._account_cache: Optional[Tuple[Any, datetime]] = None
+        self._clock_cache: Optional[Tuple[Dict[str, Any], datetime]] = None
         self._closes_cache: Dict[Tuple[str, int], Tuple[List[Tuple[datetime, float]], datetime]] = {}
         self._cache_lock = threading.Lock()
 
@@ -120,8 +128,26 @@ class AlpacaClient:
     # Account state
     # ------------------------------------------------------------------
 
-    def get_account_state(self) -> AccountState:
-        """Fetch current account equity, buying power, positions, and real portfolio Greeks."""
+    def get_account_state(self, force_refresh: bool = False) -> AccountState:
+        """
+        Current account equity, buying power, positions and real portfolio Greeks.
+
+        Cached for ACCOUNT_STATE_TTL_SECONDS because the dashboard polls status on a short timer
+        and each rebuild costs three upstream calls. The reconciliation watchdog MUST pass
+        force_refresh=True - comparing believed state against a cached copy of broker state would
+        defeat the entire point of the check.
+        """
+        if not force_refresh and self._account_cache:
+            cached, cached_at = self._account_cache
+            if (datetime.now(timezone.utc) - cached_at).total_seconds() < ACCOUNT_STATE_TTL_SECONDS:
+                return cached
+
+        state = self._build_account_state()
+        with self._cache_lock:
+            self._account_cache = (state, datetime.now(timezone.utc))
+        return state
+
+    def _build_account_state(self) -> AccountState:
         if self.has_real_client and self.trading_client:
             try:
                 acct = self.trading_client.get_account()
@@ -699,11 +725,20 @@ class AlpacaClient:
     # ------------------------------------------------------------------
 
     def get_market_clock(self) -> Dict[str, Any]:
-        """Real Alpaca market clock - used to gate autonomous trading while the market is closed."""
+        """Real Alpaca market clock - used to gate autonomous trading while the market is closed.
+        Cached briefly; session boundaries do not move minute to minute."""
+        if self._clock_cache:
+            cached, cached_at = self._clock_cache
+            if (datetime.now(timezone.utc) - cached_at).total_seconds() < MARKET_CLOCK_TTL_SECONDS:
+                return cached
         if self.has_real_client and self.trading_client:
             try:
                 clock = self.trading_client.get_clock()
-                return {"is_open": bool(clock.is_open), "next_open": str(clock.next_open), "next_close": str(clock.next_close)}
+                result = {"is_open": bool(clock.is_open), "next_open": str(clock.next_open),
+                          "next_close": str(clock.next_close)}
+                with self._cache_lock:
+                    self._clock_cache = (result, datetime.now(timezone.utc))
+                return result
             except Exception as e:
                 print(f"[MARKET CLOCK WARNING] {e}")
         return {"is_open": True, "next_open": None, "next_close": None}

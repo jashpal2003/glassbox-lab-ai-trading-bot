@@ -28,7 +28,10 @@ class ReconciliationEngine:
         Returns ReconciliationEvent and engages kill switch if mismatch is found.
         """
         # 1. Fetch real broker positions
-        account = self.client.get_account_state()
+        # force_refresh: the whole purpose of this check is to compare local belief against
+        # the broker's ACTUAL current state. A cached copy would make a real divergence
+        # invisible.
+        account = self.client.get_account_state(force_refresh=True)
         actual_pos_map = {p.symbol: p.qty for p in account.positions}
         
         # 2. Derive believed state (base real state + any injected local faults)
