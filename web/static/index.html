@@ -4,6 +4,10 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>GlassBox Pro | Autonomous AI Options Trading Terminal</title>
+  <meta name="description" content="GlassBox Options - a verifiable AI options trading agent. Strategies must earn the right to trade through historical evidence, and a deterministic risk kernel gates every order.">
+  <meta name="color-scheme" content="dark">
+  <!-- Inline SVG favicon: no extra request, no 404 on every page load. -->
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%234f46e5'/%3E%3Cpath d='M16 6l8 4.6v9.2L16 24.4 8 19.8v-9.2z' fill='none' stroke='%23fff' stroke-width='2.2' stroke-linejoin='round'/%3E%3C/svg%3E">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -42,11 +46,11 @@
     <div class="header-right">
       <div class="account-metric">
         <span class="metric-label">Buying Power</span>
-        <span class="metric-val text-cyan" id="header-buying-power">$400,000.00</span>
+        <span class="metric-val text-cyan" id="header-buying-power"><span class="await">&mdash;</span></span>
       </div>
       <div class="account-metric">
         <span class="metric-label">Portfolio Value</span>
-        <span class="metric-val" id="header-portfolio-val">$100,000.00</span>
+        <span class="metric-val" id="header-portfolio-val"><span class="await">&mdash;</span></span>
       </div>
       <button class="btn btn-secondary" onclick="openConfigModal()" title="View config.yaml limits">
         ⚙️ Risk Config
@@ -57,16 +61,16 @@
   <!-- Interactive Terminal Navigation Bar & Action Bar -->
   <div class="terminal-action-bar">
     <div class="nav-tabs">
-      <button class="nav-tab active" id="tab-btn-terminal" onclick="switchTab('terminal')">📊 Market Terminal</button>
-      <button class="nav-tab" id="tab-btn-copilot" onclick="switchTab('copilot')">🤖 Strategy Studio</button>
-      <button class="nav-tab" id="tab-btn-memory" onclick="switchTab('memory')">🧠 Self-Improving Memory (<span id="win-rate-tab-badge" style="color: var(--accent-emerald);">75%</span>)</button>
-      <button class="nav-tab" id="tab-btn-positions" onclick="switchTab('positions')">💼 Broker Holdings (<span id="pos-count-badge">0</span>)</button>
-      <button class="nav-tab" id="tab-btn-audit" onclick="switchTab('audit')">🔒 SHA-256 Audit Trail</button>
-      <button class="nav-tab" id="tab-btn-backtest" onclick="switchTab('backtest')">🧪 Quant Backtest &amp; DSR</button>
-      <button class="nav-tab" id="tab-btn-arena" onclick="switchTab('arena')">🏟️ Strategy Arena</button>
-      <button class="nav-tab" id="tab-btn-tradetrap" onclick="switchTab('tradetrap')">🛡️ TradeTrap Defense</button>
-      <button class="nav-tab" id="tab-btn-blindfold" onclick="switchTab('blindfold')">🎭 Blindfold Experiment</button>
-      <button class="nav-tab" id="tab-btn-judgedemo" onclick="switchTab('judgedemo')">🎬 Judge Demo</button>
+      <button class="nav-tab active" id="tab-btn-terminal" onclick="switchTab('terminal')" title="Live market terminal, chart and options chain">📊 Terminal</button>
+      <button class="nav-tab" id="tab-btn-copilot" onclick="switchTab('copilot')" title="AI Strategy Studio and copilot">🤖 Studio</button>
+      <button class="nav-tab" id="tab-btn-memory" onclick="switchTab('memory')" title="Self-improving memory and post-trade reflections">🧠 Memory (<span id="win-rate-tab-badge" style="color: var(--accent-emerald);">&mdash;</span>)</button>
+      <button class="nav-tab" id="tab-btn-positions" onclick="switchTab('positions')" title="Live Alpaca broker holdings and orders">💼 Holdings (<span id="pos-count-badge">0</span>)</button>
+      <button class="nav-tab" id="tab-btn-audit" onclick="switchTab('audit')" title="Tamper-evident SHA-256 audit trail and replay verifier">🔒 Audit</button>
+      <button class="nav-tab" id="tab-btn-backtest" onclick="switchTab('backtest')" title="Historical backtest and Deflated Sharpe Ratio">🧪 Backtest</button>
+      <button class="nav-tab" id="tab-btn-arena" onclick="switchTab('arena')" title="Regime engine and strategy tournament">🏟️ Arena</button>
+      <button class="nav-tab" id="tab-btn-tradetrap" onclick="switchTab('tradetrap')" title="Fault injection, reconciliation and kill switch">🛡️ TradeTrap</button>
+      <button class="nav-tab" id="tab-btn-blindfold" onclick="switchTab('blindfold')" title="Ticker-blindness reasoning honesty test">🎭 Blindfold</button>
+      <button class="nav-tab" id="tab-btn-judgedemo" onclick="switchTab('judgedemo')" title="The whole story end to end in one run">🎬 Demo</button>
     </div>
 
     <div class="terminal-quick-actions">
@@ -92,13 +96,13 @@
       <div class="glass-panel" style="padding: 0.75rem 1rem; display: flex; align-items: center; justify-content: space-between;">
         <div>
           <div style="font-size: 0.7rem; color: var(--text-muted); text-transform: uppercase; font-weight: 700;">Portfolio Delta</div>
-          <div style="font-size: 1.15rem; font-weight: 800; font-family: var(--font-mono); color: #fff;" id="gauge-delta-val">-38.0 Δ</div>
+          <div style="font-size: 1.15rem; font-weight: 800; font-family: var(--font-mono); color: #fff;" id="gauge-delta-val"><span class="await">&mdash;</span></div>
           <div style="font-size: 0.68rem; color: var(--accent-emerald);">Limit: ±250.0 Δ</div>
         </div>
         <div style="position: relative; width: 50px; height: 50px;">
           <svg viewBox="0 0 36 36" style="transform: rotate(-90deg); width: 100%; height: 100%;">
             <path stroke="rgba(255,255,255,0.08)" stroke-width="3.5" fill="none" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"/>
-            <path id="gauge-delta-bar" stroke="var(--accent-cyan)" stroke-dasharray="15, 100" stroke-width="3.5" stroke-linecap="round" fill="none" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"/>
+            <path id="gauge-delta-bar" stroke="var(--accent-cyan)" stroke-dasharray="0, 100" stroke-width="3.5" stroke-linecap="round" fill="none" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"/>
           </svg>
         </div>
       </div>
@@ -107,13 +111,13 @@
       <div class="glass-panel" style="padding: 0.75rem 1rem; display: flex; align-items: center; justify-content: space-between;">
         <div>
           <div style="font-size: 0.7rem; color: var(--text-muted); text-transform: uppercase; font-weight: 700;">Short-Vol Vega</div>
-          <div style="font-size: 1.15rem; font-weight: 800; font-family: var(--font-mono); color: var(--accent-cyan);" id="gauge-vega-val">-190.0 ν</div>
+          <div style="font-size: 1.15rem; font-weight: 800; font-family: var(--font-mono); color: var(--accent-cyan);" id="gauge-vega-val"><span class="await">&mdash;</span></div>
           <div style="font-size: 0.68rem; color: var(--accent-emerald);">Floor: -250.0 ν</div>
         </div>
         <div style="position: relative; width: 50px; height: 50px;">
           <svg viewBox="0 0 36 36" style="transform: rotate(-90deg); width: 100%; height: 100%;">
             <path stroke="rgba(255,255,255,0.08)" stroke-width="3.5" fill="none" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"/>
-            <path id="gauge-vega-bar" stroke="var(--accent-indigo)" stroke-dasharray="76, 100" stroke-width="3.5" stroke-linecap="round" fill="none" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"/>
+            <path id="gauge-vega-bar" stroke="var(--accent-indigo)" stroke-dasharray="0, 100" stroke-width="3.5" stroke-linecap="round" fill="none" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"/>
           </svg>
         </div>
       </div>
@@ -122,13 +126,13 @@
       <div class="glass-panel" style="padding: 0.75rem 1rem; display: flex; align-items: center; justify-content: space-between;">
         <div>
           <div style="font-size: 0.7rem; color: var(--text-muted); text-transform: uppercase; font-weight: 700;">Cash Cushion Floor</div>
-          <div style="font-size: 1.15rem; font-weight: 800; font-family: var(--font-mono); color: var(--accent-emerald);" id="gauge-cushion-val">100.0%</div>
+          <div style="font-size: 1.15rem; font-weight: 800; font-family: var(--font-mono); color: var(--accent-emerald);" id="gauge-cushion-val"><span class="await">&mdash;</span></div>
           <div style="font-size: 0.68rem; color: var(--accent-emerald);">Required Floor: ≥20.0%</div>
         </div>
         <div style="position: relative; width: 50px; height: 50px;">
           <svg viewBox="0 0 36 36" style="transform: rotate(-90deg); width: 100%; height: 100%;">
             <path stroke="rgba(255,255,255,0.08)" stroke-width="3.5" fill="none" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"/>
-            <path id="gauge-cushion-bar" stroke="var(--accent-emerald)" stroke-dasharray="100, 100" stroke-width="3.5" stroke-linecap="round" fill="none" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"/>
+            <path id="gauge-cushion-bar" stroke="var(--accent-emerald)" stroke-dasharray="0, 100" stroke-width="3.5" stroke-linecap="round" fill="none" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"/>
           </svg>
         </div>
       </div>
@@ -137,7 +141,7 @@
       <div class="glass-panel" style="padding: 0.75rem 1rem; display: flex; align-items: center; justify-content: space-between;">
         <div>
           <div style="font-size: 0.7rem; color: var(--text-muted); text-transform: uppercase; font-weight: 700;">Market VIX Index</div>
-          <div style="font-size: 1.15rem; font-weight: 800; font-family: var(--font-mono); color: #fff;" id="kpi-vix">16.4</div>
+          <div style="font-size: 1.15rem; font-weight: 800; font-family: var(--font-mono); color: #fff;" id="kpi-vix"><span class="await">&mdash;</span></div>
           <div style="font-size: 0.68rem; color: var(--accent-emerald);">Kill Switch Level: 30.0</div>
         </div>
         <div style="font-size: 1.5rem;">⚡</div>
@@ -180,7 +184,7 @@
           <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
             <div>
               <span style="font-size: 1.15rem; font-weight: 800; font-family: var(--font-mono);" id="chart-symbol-header">SPY</span>
-              <span style="font-size: 1.15rem; font-weight: 700; color: var(--accent-emerald); margin-left: 0.5rem;" id="chart-price-header">$651.20</span>
+              <span style="font-size: 1.15rem; font-weight: 700; color: var(--accent-emerald); margin-left: 0.5rem;" id="chart-price-header"><span class="await">&mdash;</span></span>
               <span style="font-size: 0.72rem; color: var(--accent-cyan); margin-left: 0.5rem; background: rgba(6,182,212,0.1); padding: 0.15rem 0.4rem; border-radius: 4px;">● LIVE STREAM</span>
             </div>
             <div style="display: flex; gap: 0.25rem;">
@@ -212,15 +216,15 @@
           <div class="market-kpis" style="margin-bottom: 0.75rem;">
             <div class="kpi-box">
               <div class="kpi-title">Spot Price</div>
-              <div class="kpi-number highlight" id="kpi-price">$651.20</div>
+              <div class="kpi-number highlight" id="kpi-price"><span class="await">&mdash;</span></div>
             </div>
             <div class="kpi-box">
               <div class="kpi-title">IV Rank (52w)</div>
-              <div class="kpi-number positive" id="kpi-iv-rank">78.0%</div>
+              <div class="kpi-number positive" id="kpi-iv-rank"><span class="await">&mdash;</span></div>
             </div>
             <div class="kpi-box">
               <div class="kpi-title">VRP (IV - RV)</div>
-              <div class="kpi-number positive" id="kpi-vrp">+5.2 pts</div>
+              <div class="kpi-number positive" id="kpi-vrp"><span class="await">&mdash;</span></div>
             </div>
           </div>
 
@@ -315,6 +319,14 @@
               </button>
             </div>
 
+            <label style="display: flex; align-items: center; gap: 0.4rem; font-size: 0.73rem; color: var(--text-muted); margin-bottom: 0.75rem; cursor: pointer;"
+                   title="Runs the full decision path but does not submit an approved order to the broker.">
+              <input type="checkbox" id="studio-dry-run" checked>
+              Dry run &mdash; evaluate without placing a real paper order
+            </label>
+
+            <div id="studio-arena-context" style="display: none; margin-bottom: 0.75rem;"></div>
+
             <div style="font-size: 0.75rem; font-weight: 700; color: var(--text-secondary); text-transform: uppercase; margin-bottom: 0.35rem;">
               Structured Intent Output (Zero Direct Broker Authority)
             </div>
@@ -331,7 +343,7 @@
           <!-- Deterministic Risk Kernel Matrix -->
           <div class="glass-panel" style="padding: 1rem;">
             <div class="card-header" style="padding: 0 0 0.5rem 0;">
-              <div class="card-title"><span>🛡️ Deterministic Risk Kernel Gating (10 Rules)</span></div>
+              <div class="card-title"><span>🛡️ Deterministic Risk Kernel Gating (<span id="kernel-rule-count">—</span> rules)</span></div>
               <span class="card-badge badge-indigo" id="kernel-badge">PURE NON-LLM GATE</span>
             </div>
 
@@ -354,36 +366,9 @@
                 </tr>
               </thead>
               <tbody id="risk-checks-body">
-                <tr>
-                  <td>Require Defined Risk (No Naked)</td>
-                  <td style="font-family: var(--font-mono);">-</td>
-                  <td style="font-family: var(--font-mono);">1.0</td>
-                  <td><span class="check-pass">PASS</span></td>
-                </tr>
-                <tr>
-                  <td>Max Single BP Allocation</td>
-                  <td style="font-family: var(--font-mono);">-</td>
-                  <td style="font-family: var(--font-mono);">5.0%</td>
-                  <td><span class="check-pass">PASS</span></td>
-                </tr>
-                <tr>
-                  <td>Cash Cushion Reserve Floor</td>
-                  <td style="font-family: var(--font-mono);">-</td>
-                  <td style="font-family: var(--font-mono);">20.0%</td>
-                  <td><span class="check-pass">PASS</span></td>
-                </tr>
-                <tr>
-                  <td>Max Portfolio Delta</td>
-                  <td style="font-family: var(--font-mono);">-</td>
-                  <td style="font-family: var(--font-mono);">±250.0</td>
-                  <td><span class="check-pass">PASS</span></td>
-                </tr>
-                <tr>
-                  <td>Max Short-Vol Vega</td>
-                  <td style="font-family: var(--font-mono);">-</td>
-                  <td style="font-family: var(--font-mono);">-250.0</td>
-                  <td><span class="check-pass">PASS</span></td>
-                </tr>
+                <tr><td colspan="4" style="text-align:center; color: var(--text-muted); padding: 1.25rem;">
+                  Awaiting evaluation &mdash; run a strategy to populate the live kernel checks.
+                </td></tr>
               </tbody>
             </table>
 
@@ -438,15 +423,15 @@
             <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.65rem; margin-bottom: 1rem;">
               <div class="kpi-box">
                 <div class="kpi-title">Empirical Win Rate</div>
-                <div class="kpi-number positive" id="mem-win-rate">75.0%</div>
+                <div class="kpi-number positive" id="mem-win-rate"><span class="await">&mdash;</span></div>
               </div>
               <div class="kpi-box">
                 <div class="kpi-title">Realized Net P&amp;L</div>
-                <div class="kpi-number positive" id="mem-net-pnl">+$120.00</div>
+                <div class="kpi-number positive" id="mem-net-pnl"><span class="await">&mdash;</span></div>
               </div>
               <div class="kpi-box">
                 <div class="kpi-title">Learning Cycles</div>
-                <div class="kpi-number highlight" id="mem-cycles">3</div>
+                <div class="kpi-number highlight" id="mem-cycles"><span class="await">&mdash;</span></div>
               </div>
             </div>
 
@@ -458,22 +443,22 @@
             <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem; margin-bottom: 0.75rem;">
               <div style="background: rgba(0,0,0,0.25); padding: 0.6rem; border-radius: 6px; border: 1px solid var(--border-card);">
                 <div style="font-size: 0.68rem; color: var(--text-muted);">Wing Buffer Multiplier</div>
-                <div style="font-size: 1.05rem; font-weight: 700; font-family: var(--font-mono); color: var(--accent-cyan);" id="mem-wing-mult">1.00x</div>
+                <div style="font-size: 1.05rem; font-weight: 700; font-family: var(--font-mono); color: var(--accent-cyan);" id="mem-wing-mult"><span class="await">&mdash;</span></div>
                 <div style="font-size: 0.62rem; color: var(--text-muted);">Auto-widens on realized vol spikes</div>
               </div>
               <div style="background: rgba(0,0,0,0.25); padding: 0.6rem; border-radius: 6px; border: 1px solid var(--border-card);">
                 <div style="font-size: 0.68rem; color: var(--text-muted);">Min VRP Threshold</div>
-                <div style="font-size: 1.05rem; font-weight: 700; font-family: var(--font-mono); color: var(--accent-emerald);" id="mem-vrp-thresh">2.00 pts</div>
+                <div style="font-size: 1.05rem; font-weight: 700; font-family: var(--font-mono); color: var(--accent-emerald);" id="mem-vrp-thresh"><span class="await">&mdash;</span></div>
                 <div style="font-size: 0.62rem; color: var(--text-muted);">Selectivity gate for premium sales</div>
               </div>
               <div style="background: rgba(0,0,0,0.25); padding: 0.6rem; border-radius: 6px; border: 1px solid var(--border-card);">
                 <div style="font-size: 0.68rem; color: var(--text-muted);">Profit Target Floor</div>
-                <div style="font-size: 1.05rem; font-weight: 700; font-family: var(--font-mono); color: #fff;" id="mem-profit-target">50.0%</div>
+                <div style="font-size: 1.05rem; font-weight: 700; font-family: var(--font-mono); color: #fff;" id="mem-profit-target"><span class="await">&mdash;</span></div>
                 <div style="font-size: 0.62rem; color: var(--text-muted);">Auto-harvests max profit</div>
               </div>
               <div style="background: rgba(0,0,0,0.25); padding: 0.6rem; border-radius: 6px; border: 1px solid var(--border-card);">
                 <div style="font-size: 0.68rem; color: var(--text-muted);">Stop-Loss Cap</div>
-                <div style="font-size: 1.05rem; font-weight: 700; font-family: var(--font-mono); color: var(--accent-rose);" id="mem-stop-loss">1.50x</div>
+                <div style="font-size: 1.05rem; font-weight: 700; font-family: var(--font-mono); color: var(--accent-rose);" id="mem-stop-loss"><span class="await">&mdash;</span></div>
                 <div style="font-size: 0.62rem; color: var(--text-muted);">Multi-credit loss exit limit</div>
               </div>
             </div>
@@ -644,26 +629,26 @@
           <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 0.75rem; margin-bottom: 1rem;">
             <div class="kpi-box">
               <div class="kpi-title">Win Rate</div>
-              <div class="kpi-number positive" id="tab-bt-win-rate">77.8%</div>
+              <div class="kpi-number positive" id="tab-bt-win-rate"><span class="await">&mdash;</span></div>
             </div>
             <div class="kpi-box">
               <div class="kpi-title">Total Return</div>
-              <div class="kpi-number positive" id="tab-bt-total-ret">+14.3%</div>
+              <div class="kpi-number positive" id="tab-bt-total-ret"><span class="await">&mdash;</span></div>
             </div>
             <div class="kpi-box">
               <div class="kpi-title">Max Drawdown</div>
-              <div class="kpi-number negative" id="tab-bt-max-dd">-4.2%</div>
+              <div class="kpi-number negative" id="tab-bt-max-dd"><span class="await">&mdash;</span></div>
             </div>
             <div class="kpi-box">
               <div class="kpi-title">Deflated Sharpe (DSR)</div>
-              <div class="kpi-number highlight" id="tab-bt-dsr">0.912</div>
+              <div class="kpi-number highlight" id="tab-bt-dsr"><span class="await">&mdash;</span></div>
             </div>
           </div>
 
           <div style="background: rgba(0,0,0,0.3); border: 1px solid var(--border-card); border-radius: 6px; padding: 0.85rem; margin-bottom: 1rem;">
             <div style="display: flex; justify-content: space-between; font-size: 0.75rem; color: var(--text-muted); margin-bottom: 0.4rem;">
               <span>Simulated Equity Curve (180-day Replay)</span>
-              <span id="tab-bt-verdict" style="color: var(--accent-emerald); font-weight: 700;">LOW OVERFITTING RISK</span>
+              <span id="tab-bt-verdict" style="color: var(--accent-emerald); font-weight: 700;">&mdash;</span>
             </div>
             <canvas id="backtestTabEquityCanvas" width="800" height="150" style="width: 100%; height: 150px;"></canvas>
           </div>
@@ -912,21 +897,7 @@
         <h3 style="font-size: 1rem; font-weight: 700; color: #fff;">⚙️ Human-Readable Risk Limits (config.yaml)</h3>
         <button class="close-btn" onclick="closeConfigModal()">&times;</button>
       </div>
-      <pre class="json-display" id="config-yaml-display" style="max-height: 350px;">
-# kernel/config.yaml - Version 1
-limits:
-  max_portfolio_delta: 250
-  max_portfolio_vega: -250           # Cap on short-vol exposure
-  max_single_position_pct_bp: 5.0    # % of buying power in one position
-  max_open_positions: 8
-  min_buying_power_floor_pct: 20.0   # Never deploy below this cash cushion
-  max_spread_pct_of_mid: 8.0         # Liquidity gate (%)
-  require_defined_risk: true         # No naked legs, ever, no exceptions
-  earnings_blackout_days: 2
-  vix_kill_switch_level: 30.0
-  min_open_interest: 50
-  min_daily_volume: 10
-      </pre>
+      <pre class="json-display" id="config-yaml-display" style="max-height: 350px;">Loading kernel/config.yaml…</pre>
       <div style="margin-top: 1.25rem; display: flex; justify-content: flex-end;">
         <button class="btn btn-secondary" onclick="closeConfigModal()">Done</button>
       </div>

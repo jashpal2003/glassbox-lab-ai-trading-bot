@@ -223,7 +223,37 @@ def validate(
     if not spread_pass:
         reasons.append(f"Contract spread {spread_val:.1f}% exceeds maximum allowable spread {max_spread_limit}%.")
 
-    # 9. VIX Level Check
+    # 9. Open Interest Gate
+    # config.yaml declared min_open_interest but nothing enforced it - a limit that silently does
+    # nothing is worse than no limit, because it reads like a guarantee. Open interest IS real in
+    # Alpaca's contracts feed, so it is now genuinely enforced against the legs being traded.
+    # (min_daily_volume stays unenforced and is annotated as such in config.yaml: per-contract
+    # daily volume is not in the free feed, so every contract reports 0 and gating on it would
+    # reject everything.)
+    min_oi_limit = cfg.get("min_open_interest", 50)
+    if market_context and market_context.contracts and intent.size > 0:
+        leg_strikes = {(leg.type, leg.strike) for leg in intent.legs}
+        leg_contracts = [c for c in market_context.contracts if (c.type, c.strike) in leg_strikes]
+        worst_oi = min((c.open_interest for c in leg_contracts), default=None)
+    else:
+        worst_oi = None
+
+    if worst_oi is not None:
+        oi_pass = worst_oi >= min_oi_limit
+        checks.append(KernelCheck(
+            check="min_open_interest",
+            value=float(worst_oi),
+            limit=float(min_oi_limit),
+            pass_status=oi_pass,
+            description="Thinnest traded leg's open interest (liquidity / exit-risk gate)"
+        ))
+        if not oi_pass:
+            reasons.append(
+                f"Thinnest leg has {worst_oi} open interest, below the {min_oi_limit} minimum "
+                f"— too illiquid to exit reliably."
+            )
+
+    # 10. VIX Level Check
     # market_context omitted entirely (e.g. kernel-only unit tests) -> benign default.
     # market_context present but vix is None -> live VIX fetch failed; fail closed, never guess.
     vix_limit = cfg.get("vix_kill_switch_level", 30.0)

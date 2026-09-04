@@ -82,7 +82,15 @@ graph TD
 * **Key Components**:
   * [system_prompt.md](file:///c:/hackathone/glassbox%20lab%20ai%20trading%20bot/reasoning/prompts/system_prompt.md): Explicitly constrains the LLM to output pure JSON following the `Intent` schema. Strictly prohibits external opinions; requires numeric rationale citing only provided market metrics.
   * [agent.py](file:///c:/hackathone/glassbox%20lab%20ai%20trading%20bot/reasoning/agent.py): Multi-provider LLM connector (Google Gemini default, OpenRouter fallback, and deterministic backup). Validates responses against Pydantic schema with fail-closed retry.
-  * [regime_classifier.py](file:///c:/hackathone/glassbox%20lab%20ai%20trading%20bot/reasoning/regime_classifier.py): Labels market states (`sell_premium`, `stand_down_high_vix`, `stand_down_earnings`, `neutral`).
+  * `reasoning/regime_engine.py`: Deterministic market-regime classifier. Labels the environment as one of
+    `HIGH_VOL_RANGE`, `HIGH_VOL_TREND`, `LOW_VOL_TREND`, `LOW_VOL_RANGE`, `VOL_EXPANSION` or `EVENT_RISK`
+    from real numbers only (IV rank, VRP, CBOE VIX, 20-session trend, EMA stretch, 10d/60d realized-vol
+    expansion ratio). A missing VIX classifies as `EVENT_RISK` rather than being assumed safe. The regime
+    determines which Strategy Arena variants are even eligible to compete.
+  * `reasoning/strategy_arena.py`: Replays every strategy variant over the same real historical closes and
+    ranks them by a published composite score; the eligible winner becomes the evidence-backed champion.
+  * `reasoning/llm_client.py`: Single multi-provider LLM client (Gemini -> OpenRouter -> deterministic
+    fallback) shared by Intent generation, post-trade reflection and the copilot chat.
   * [blindfold.py](file:///c:/hackathone/glassbox%20lab%20ai%20trading%20bot/reasoning/blindfold.py): The Act 3 anonymization experiment runner. Replaces ticker identifiers (`SPY` $\rightarrow$ `ASSET_04`) to measure model strategy honesty.
 
 ---

@@ -318,3 +318,106 @@ def test_short_positions_are_signed_negative_not_double_flipped():
     # Correct even if a future API version stops signing qty for shorts.
     assert _signed_qty(_FakePos("SPY_P", "3", "PositionSide.SHORT")) == -3.0
     assert _signed_qty(_FakePos("SPY_P", "-3", "PositionSide.LONG")) == 3.0
+
+
+# --- Liquidity gating & expiry selection ---------------------------------------------
+
+def _ctx_with_chain(oi_values, strikes=(95.0, 100.0, 105.0, 110.0)):
+    from shared.schemas import OptionContractQuote
+    contracts = []
+    for strike, oi in zip(strikes, oi_values):
+        for typ in ("put", "call"):
+            contracts.append(OptionContractQuote(
+                symbol=f"T{strike}{typ}", strike=strike, expiry="2030-01-18", type=typ,
+                bid=1.0, ask=1.04, mid=1.02, spread_pct=2.0, open_interest=oi, volume=0,
+                delta=0.3, gamma=0.01, theta=-0.02, vega=0.1, implied_volatility=20.0,
+            ))
+    return make_ctx(contracts=contracts, underlying_price=102.0)
+
+
+def _condor_intent():
+    from shared.schemas import Intent, OptionLeg
+    return Intent(
+        underlying="TEST", structure="iron_condor",
+        legs=[
+            OptionLeg(action="sell", type="put", strike=100.0, expiry="2030-01-18"),
+            OptionLeg(action="buy", type="put", strike=95.0, expiry="2030-01-18"),
+            OptionLeg(action="sell", type="call", strike=105.0, expiry="2030-01-18"),
+            OptionLeg(action="buy", type="call", strike=110.0, expiry="2030-01-18"),
+        ],
+        size=1, rationale="test", conviction=0.6,
+    )
+
+
+def test_illiquid_leg_is_rejected_by_open_interest_gate():
+    """min_open_interest was declared in config.yaml but never enforced - now it is."""
+    from kernel.risk_kernel import validate
+    from kernel.kill_switch import kill_switch
+    kill_switch.reset()
+
+    ctx = _ctx_with_chain([5000, 5000, 5000, 3])   # one leg is effectively untradable
+    decision = validate(_condor_intent(), ctx.account_state, market_context=ctx)
+    oi_check = next(c for c in decision.kernel_checks if c.check == "min_open_interest")
+    assert oi_check.pass_status is False
+    assert oi_check.value == 3
+    assert any("open interest" in r for r in decision.reasons)
+
+
+def test_liquid_legs_pass_open_interest_gate():
+    from kernel.risk_kernel import validate
+    from kernel.kill_switch import kill_switch
+    kill_switch.reset()
+
+    ctx = _ctx_with_chain([9000, 9000, 9000, 9000])
+    decision = validate(_condor_intent(), ctx.account_state, market_context=ctx)
+    oi_check = next(c for c in decision.kernel_checks if c.check == "min_open_interest")
+    assert oi_check.pass_status is True
+
+
+def test_open_interest_check_is_skipped_when_no_chain_data():
+    """No chain (kernel-only unit tests) must not fabricate a zero-liquidity reading."""
+    from kernel.risk_kernel import validate
+    from kernel.kill_switch import kill_switch
+    kill_switch.reset()
+
+    decision = validate(_condor_intent(), make_ctx().account_state)
+    assert not any(c.check == "min_open_interest" for c in decision.kernel_checks)
+
+
+def test_debit_spread_is_recognised_as_defined_risk():
+    """
+    A bull call spread (long lower strike, short higher) is defined-risk: max loss is the debit.
+    The original check demanded the long wing be BEYOND the short strike and would have called
+    this naked.
+    """
+    from shared.schemas import Intent, OptionLeg
+    from kernel.risk_kernel import verify_defined_risk_and_max_loss
+
+    bull_call = Intent(
+        underlying="TEST", structure="debit_spread",
+        legs=[
+            OptionLeg(action="buy", type="call", strike=100.0, expiry="2030-01-18"),
+            OptionLeg(action="sell", type="call", strike=110.0, expiry="2030-01-18"),
+        ],
+        size=1, rationale="test", conviction=0.6,
+    )
+    is_defined, max_loss, _, _ = verify_defined_risk_and_max_loss(bull_call)
+    assert is_defined is True
+    assert max_loss == pytest.approx(10.0 * 100.0)
+
+
+def test_truly_naked_short_leg_is_still_rejected():
+    """Widening defined-risk recognition must not weaken the no-naked rule."""
+    from shared.schemas import Intent, OptionLeg
+    from kernel.risk_kernel import verify_defined_risk_and_max_loss
+
+    naked = Intent(
+        underlying="TEST", structure="strangle",
+        legs=[
+            OptionLeg(action="sell", type="call", strike=110.0, expiry="2030-01-18"),
+            OptionLeg(action="sell", type="put", strike=90.0, expiry="2030-01-18"),
+        ],
+        size=1, rationale="test", conviction=0.6,
+    )
+    is_defined, _, _, _ = verify_defined_risk_and_max_loss(naked)
+    assert is_defined is False

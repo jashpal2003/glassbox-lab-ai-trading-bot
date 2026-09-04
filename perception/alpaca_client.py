@@ -26,6 +26,7 @@ without keys.
 import os
 import csv
 import io
+import threading
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any, Optional, Tuple
@@ -46,6 +47,22 @@ load_dotenv()
 
 CBOE_VIX_URL = "https://cdn.cboe.com/api/global/us_indices/daily_prices/VIX_History.csv"
 VIX_CACHE_TTL_SECONDS = 900
+
+# Short-lived caches. The dashboard polls several endpoints on timers and each MarketContext
+# rebuild costs multiple upstream API round-trips (bars, latest trade, contract master, chain
+# snapshot, VIX, account + position Greeks). Without these a single page sitting open hammers
+# Alpaca and every panel waits ~6s.
+#
+# TTLs are deliberately short and asymmetric to what the data actually is: daily closes only
+# change once a day, so caching them for minutes is exact, not approximate. The context TTL is
+# small enough that quoted prices stay current for a human reading a dashboard.
+MARKET_CONTEXT_TTL_SECONDS = 20
+DAILY_CLOSES_TTL_SECONDS = 900
+
+# Contracts whose strike is off the standard grid (SPY lists 1-point strikes alongside the
+# 5-point grid) are never selected by build_structure, which snaps to the grid - carrying them
+# just inflates the payload and the browser's render cost.
+MAX_CHAIN_CONTRACTS = 160
 
 
 def _signed_qty(position) -> float:
@@ -76,6 +93,9 @@ class AlpacaClient:
         self.has_real_client = False
 
         self._vix_cache: Optional[Tuple[float, datetime]] = None
+        self._ctx_cache: Dict[str, Tuple[Any, datetime]] = {}
+        self._closes_cache: Dict[Tuple[str, int], Tuple[List[Tuple[datetime, float]], datetime]] = {}
+        self._cache_lock = threading.Lock()
 
         # In-memory believed state store - used ONLY when no live credentials are configured.
         self.sim_cash = 50000.0
@@ -191,19 +211,49 @@ class AlpacaClient:
     # Market context (perception layer's single output to the reasoning layer)
     # ------------------------------------------------------------------
 
-    def get_market_context(self, underlying: str = "SPY") -> MarketContext:
-        ticker = underlying.upper()
-        now_iso = datetime.now(timezone.utc).isoformat()
+    def get_market_context(self, underlying: str = "SPY", force_refresh: bool = False) -> MarketContext:
+        """
+        Current market context for a symbol, cached for MARKET_CONTEXT_TTL_SECONDS.
 
+        Rebuilding costs several upstream round-trips, and the dashboard polls on timers; without
+        the cache a single open page re-fetches the whole chain every few seconds. Pass
+        force_refresh=True where freshness genuinely matters more than latency.
+        """
+        ticker = underlying.upper()
+
+        if not force_refresh:
+            with self._cache_lock:
+                cached = self._ctx_cache.get(ticker)
+            if cached:
+                ctx, cached_at = cached
+                if (datetime.now(timezone.utc) - cached_at).total_seconds() < MARKET_CONTEXT_TTL_SECONDS:
+                    return ctx
+
+        now_iso = datetime.now(timezone.utc).isoformat()
         if self.has_real_client:
             try:
-                return self._get_real_market_context(ticker, now_iso)
+                ctx = self._get_real_market_context(ticker, now_iso)
             except Exception as e:
                 print(f"[MARKET DATA WARNING] Real data path failed for {ticker}: {e}. Falling back to simulated feed.")
+                ctx = self._get_simulated_market_context(ticker, now_iso)
+        else:
+            ctx = self._get_simulated_market_context(ticker, now_iso)
 
-        return self._get_simulated_market_context(ticker, now_iso)
+        with self._cache_lock:
+            self._ctx_cache[ticker] = (ctx, datetime.now(timezone.utc))
+        return ctx
 
     def _get_daily_closes(self, ticker: str, lookback_days: int = 400) -> List[Tuple[datetime, float]]:
+        # Daily bars only change once a day, so caching them for minutes is exact rather than
+        # approximate. Both the market context and every Strategy Arena backtest read this.
+        key = (ticker, lookback_days)
+        with self._cache_lock:
+            cached = self._closes_cache.get(key)
+        if cached:
+            rows, cached_at = cached
+            if (datetime.now(timezone.utc) - cached_at).total_seconds() < DAILY_CLOSES_TTL_SECONDS:
+                return rows
+
         from alpaca.data.requests import StockBarsRequest
         from alpaca.data.timeframe import TimeFrame
         from alpaca.data.enums import DataFeed
@@ -212,8 +262,10 @@ class AlpacaClient:
         start = end - timedelta(days=lookback_days)
         req = StockBarsRequest(symbol_or_symbols=ticker, timeframe=TimeFrame.Day, start=start, end=end, feed=DataFeed.IEX)
         bars = self.stock_data_client.get_stock_bars(req)
-        rows = bars.data.get(ticker, [])
-        return [(b.timestamp, float(b.close)) for b in rows]
+        rows = [(b.timestamp, float(b.close)) for b in bars.data.get(ticker, [])]
+        with self._cache_lock:
+            self._closes_cache[key] = (rows, datetime.now(timezone.utc))
+        return rows
 
     def get_daily_closes(self, ticker: str, lookback_days: int = 400) -> List[float]:
         """Public helper: real historical daily closing prices, oldest first. Used by the
@@ -321,8 +373,29 @@ class AlpacaClient:
         if not all_contracts:
             raise RuntimeError(f"No listed option contracts found for {ticker} in the target expiry window.")
 
+        # Pick the most LIQUID expiry in the window, not merely the first one past 14 days.
+        #
+        # Underlyings list many near-dated weeklies that are barely traded: for SPY, the 2026-09-17
+        # weekly carried zero open interest across every strike while the 2026-09-18 monthly - one
+        # day later - had 642 contracts and OI up to 211,162. Taking "first expiry >= 14 DTE"
+        # routinely landed on the dead one, which meant modeled prices instead of real quotes, wide
+        # spreads, and legs that genuinely could not be exited. Ranking by real open interest fixes
+        # the quality of every number downstream.
         expiries = sorted({c.expiration_date for c in all_contracts})
-        target_expiry_date = next((e for e in expiries if (e - now.date()).days >= 14), expiries[0])
+        eligible = [e for e in expiries if (e - now.date()).days >= 14] or expiries
+
+        def expiry_liquidity(exp) -> int:
+            return sum(int(c.open_interest or 0) for c in all_contracts if c.expiration_date == exp)
+
+        scored = [(expiry_liquidity(e), e) for e in eligible]
+        best_oi = max(oi for oi, _ in scored)
+        if best_oi > 0:
+            # Prefer the deepest open interest; tie-break toward the nearest such expiry.
+            target_expiry_date = min((e for oi, e in scored if oi == best_oi))
+        else:
+            # No open-interest data at all in the window - fall back to the original rule rather
+            # than pretending we made an informed choice.
+            target_expiry_date = eligible[0]
         target_expiry = target_expiry_date.isoformat()
 
         lo_strike, hi_strike = spot * 0.85, spot * 1.15
@@ -330,6 +403,22 @@ class AlpacaClient:
             c for c in all_contracts
             if c.expiration_date == target_expiry_date and lo_strike <= float(c.strike_price) <= hi_strike
         ]
+
+        # Keep the standard strike grid. build_structure() snaps every leg to a multiple of the
+        # strike step, so off-grid strikes (SPY lists 1-point strikes beside the 5-point grid) can
+        # never be traded and only bloat the payload. Fall back to the unfiltered set if the grid
+        # filter would leave too little to work with.
+        step = 5.0 if spot > 300 else (2.5 if spot > 80 else 1.0)
+        on_grid = [c for c in candidates if abs(float(c.strike_price) % step) < 1e-6]
+        if len(on_grid) >= 16:
+            candidates = on_grid
+
+        # Still too many (very wide chains)? Keep the strikes nearest the money - that is where
+        # every structure in the population places its legs.
+        if len(candidates) > MAX_CHAIN_CONTRACTS:
+            candidates.sort(key=lambda c: abs(float(c.strike_price) - spot))
+            candidates = candidates[:MAX_CHAIN_CONTRACTS]
+
         candidates.sort(key=lambda c: float(c.strike_price))
 
         live_snapshots: Dict[str, Any] = {}

@@ -28,12 +28,15 @@ class TradeRecord(BaseModel):
     entry_vega: float
     max_profit: float
     max_loss: float
+    variant_id: str = ""          # which Strategy Arena variant produced this trade, if any
     realized_pnl: float = 0.0
     pnl_pct: float = 0.0
     status: str = "OPEN"  # OPEN, WIN, LOSS, SCRATCH
     thesis: str = ""
     reflection: str = ""
-    reflection_source: str = "none"  # "gemini" or "template_fallback" once reflected, else "none"
+    # Which provider produced the reflection: "gemini" / "openrouter" / "template_fallback",
+    # or "none" before the trade has been reflected on.
+    reflection_source: str = "none"
     lessons_learned: List[str] = Field(default_factory=list)
 
 class AdaptiveStrategyParameters(BaseModel):
@@ -50,9 +53,12 @@ class AdaptiveStrategyParameters(BaseModel):
     })
 
 class SelfImprovingMemory:
-    def __init__(self, memory_path: str = MEMORY_FILE_PATH, gemini_client: Optional[Any] = None):
+    def __init__(self, memory_path: str = MEMORY_FILE_PATH, llm: Optional[Any] = None):
         self.memory_path = memory_path
-        self.gemini_client = gemini_client
+        # Shared multi-provider LLM client, injected by LLMReasoningAgent at startup. Previously
+        # this was a Gemini-only handle, so reflections fell straight through to canned templates
+        # whenever Gemini was down even if OpenRouter was configured and healthy.
+        self.llm = llm
         self.trades: List[TradeRecord] = []
         self.params = AdaptiveStrategyParameters()
         self.total_realized_pnl: float = 0.0
@@ -106,6 +112,8 @@ class SelfImprovingMemory:
         market_ctx: Dict[str, Any],
         order_id: str,
         decision_dict: Optional[Dict[str, Any]] = None,
+        estimated_credit: Optional[float] = None,
+        variant_id: Optional[str] = None,
     ) -> TradeRecord:
         """Log a newly opened trade into memory.
 
@@ -132,8 +140,11 @@ class SelfImprovingMemory:
             entry_iv_rank=float(market_ctx.get("iv_rank", 0.0)),
             entry_delta=round(entry_delta, 2),
             entry_vega=round(entry_vega, 2),
-            max_profit=0.0,  # not computed anywhere yet - honestly unknown rather than a fabricated guess
+            # For a credit structure the premium collected IS the max profit, priced from the real
+            # option chain at entry. 0.0 means genuinely unknown (no chain match), never a guess.
+            max_profit=round(estimated_credit, 2) if estimated_credit and estimated_credit > 0 else 0.0,
             max_loss=max_loss,
+            variant_id=variant_id or "",
             status="OPEN",
             thesis=intent_dict.get("rationale", "Grounded defined-risk premium harvest.")
         )
@@ -208,10 +219,12 @@ class SelfImprovingMemory:
         return trade
 
     def _generate_reflection(self, trade: TradeRecord) -> tuple[str, List[str], str]:
-        """Generate Gemini reflection on trade outcome. Returns (reflection, lessons, source) where
-        source is "gemini" for a real generated reflection or "template_fallback" for the
-        deterministic canned text used when Gemini is unavailable or errors - callers must not
-        present a template_fallback reflection as genuine model insight."""
+        """Generate an LLM reflection on a closed trade.
+
+        Returns (reflection, lessons, source) where source names the provider that actually
+        answered ("gemini" / "openrouter") or "template_fallback" for the deterministic canned
+        text used when no provider is reachable. Callers must never present a template_fallback
+        reflection as genuine model insight - the UI reads this field to label it."""
         prompt = f"""You are the Meta-Cognitive Self-Improvement Engine of GlassBox Options.
 Analyze this closed options trade:
 - Underlying: {trade.underlying} ({trade.structure})
@@ -225,15 +238,16 @@ Provide:
 2. Two concise bullet points summarizing actionable lessons for future trade structuring."""
 
         try:
-            if self.gemini_client:
-                res = self.gemini_client.generate_content(prompt)
-                text = res.text.strip()
-                lines = [line.strip("- *").strip() for line in text.split("\n") if line.strip()]
-                reflection = text[:250]
-                lessons = [l for l in lines if len(l) > 15 and not l.startswith("You")][:2]
-                if not lessons:
-                    lessons = [f"Adjust strike buffer on {trade.underlying} based on realized vol velocity."]
-                return reflection, lessons, "gemini"
+            if self.llm:
+                res = self.llm.generate(prompt)
+                if res.ok:
+                    text = res.text.strip()
+                    lines = [line.strip("- *").strip() for line in text.split("\n") if line.strip()]
+                    reflection = text[:250]
+                    lessons = [l for l in lines if len(l) > 15 and not l.startswith("You")][:2]
+                    if not lessons:
+                        lessons = [f"Adjust strike buffer on {trade.underlying} based on realized vol velocity."]
+                    return reflection, lessons, res.provider
         except Exception as e:
             print(f"[REFLECTION ENGINE ERROR] {e}")
 

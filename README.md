@@ -1,152 +1,214 @@
 # GlassBox Options
 
-> **"We built the safety layer that makes any autonomous options trading agent auditable, attack-resistant, and strategy-honest — and we can prove all three, live, on stage."**
+> **Most AI trading agents ask a model what to trade. GlassBox asks a harder question first: has this strategy earned the right to trade at all?**
 
-[![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/)
+[![Tests](https://img.shields.io/badge/offline%20tests-68%20passing-brightgreen.svg)](tests/)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Hackathon](https://img.shields.io/badge/lablab.ai-Alpaca%20AI%20Trading%20Agents-indigo.svg)](https://lablab.ai/ai-hackathons/alpaca-ai-trading-agents-hackathon)
 
 ---
 
-## 🎯 Executive Summary & The One-Sentence Pitch
+## The One-Sentence Pitch
 
-**GlassBox Options** enforces a non-negotiable architectural boundary: **The LLM never talks to Alpaca.** The LLM only emits a structured, schema-validated trade `Intent`. A deterministic, pure non-LLM **Risk Kernel** is the only entity authorized to evaluate risk limits and execute multi-leg orders on Alpaca Paper Trading.
+**GlassBox Options is a self-learning options trading agent whose strategies must prove themselves
+against real historical evidence before the AI is even allowed to propose them — and whose every
+resulting order is gated by a deterministic, non-LLM risk kernel and recorded as a tamper-evident
+cryptographic receipt.**
 
-Every decision generates a canonical SHA-256 cryptographic snapshot at the exact millisecond of execution, enabling instant mathematical replay and condition verification. An automated background reconciliation loop continuously polls broker state to neutralize state-tampering attacks in real-time.
+Two independent boundaries, and neither one is an LLM:
+
+| | The Strategy Lab | The Risk Kernel |
+|---|---|---|
+| **Job** | Decides what *deserves consideration* | Decides what is *allowed to execute* |
+| **Behaviour** | Learns and evolves | Never learns. Never changes at runtime. |
+| **Powered by** | Real historical replay | Ten fixed numeric limits in `kernel/config.yaml` |
 
 ---
 
-## 🏗️ System Architecture
+## Architecture
 
 ```
-┌──────────────┐    ┌───────────────┐    ┌────────────────┐    ┌─────────────┐
-│  PERCEPTION  │ -> │   REASONING   │ -> │  RISK KERNEL   │ -> │  EXECUTION  │
-│ (market data,│    │  (LLM agent,  │    │(deterministic, │    │   (Alpaca   │
-│ IV/RV, Greeks│    │  emits Intent │    │  no LLM calls, │    │  paper API) │
-│ news, vol    │    │   JSON only)  │    │  hard limits)  │    │             │
-│   surface)   │    │               │    └───────┬────────┘    └──────┬──────┘
-└──────────────┘    └───────────────┘            │ APPROVE/REJECT     │
-                                                 ▼                    │
-                                      ┌────────────────────┐          │
-                                      │  SNAPSHOT + HASH   │<---------┘
-                                      │   (audit record)   │   after fill
-                                      └─────────┬──────────┘
-                                                │
-                        ┌───────────────────────┴───────────────────────┐
-                        ▼                                               ▼
-             ┌─────────────────────┐                         ┌────────────────────┐
-             │    JUDGE-FACING     │                         │   RECONCILIATION   │
-             │   AUDIT DASHBOARD   │                         │ LOOP (polls broker │
-             │  (replay + verify)  │                         │ state continuously)│
-             └─────────────────────┘                         └──────────┬─────────┘
-                                                                        │ mismatch
-                                                                        ▼
-                                                             ┌────────────────────┐
-                                                             │   FAULT INJECTOR + │
-                                                             │    KILL SWITCH     │
-                                                             │ (halts new orders) │
-                                                             └────────────────────┘
+                          ALPACA  (market data + paper broker)
+                                     |
+                                     v
+   PERCEPTION      real bars, real options chain, real OI/Greeks, CBOE VIX
+        |          + trend & vol-term-structure signals from the same bars
+        v
+   REGIME ENGINE   deterministic, 6 named regimes, fails closed when VIX is missing
+        |
+        v
+   STRATEGY ARENA  6 strategy variants replayed over the SAME real history,
+        |          ranked by a published composite score.
+        |          Only variants eligible for the CURRENT regime may win.
+        v
+   REASONING       LLM proposes a structured Intent, constrained by arena evidence
+        |          (Gemini -> OpenRouter -> deterministic rules; never fabricates)
+        v
+   RISK KERNEL     PURE, NO LLM. 10 enforced limits. APPROVE or REJECT.
+        |
+   +----+-----------------------------+
+   | APPROVED                  REJECTED
+   v                                  v
+   EXECUTION (real MLEG order)    AUDIT ONLY
+   |                                  |
+   +----------------+-----------------+
+                    v
+        SHA-256 AUDIT SNAPSHOT  ->  independent replay verifier
+                    |
+                    v
+        RECONCILIATION LOOP (30s) -> KILL SWITCH on any broker/ledger divergence
+                    |
+                    v
+        LEARNING ENGINE -> post-trade reflection -> adaptive parameters
 ```
 
 ---
 
-## 🎬 Three Live Demo Acts (~2 Minutes)
+## What makes it different
 
-### Act 1 — GlassBox (The Happy Path & The Guaranteed Rejection)
-1. **Live Run**: The LLM analyzes live options chain metrics (IV Rank, VRP, Greeks) on SPY and proposes a defined-risk Iron Condor.
-2. **Deterministic Gating**: The Risk Kernel tests against `kernel/config.yaml` limits (Delta cap, Vega limit, Max BP %, Cash cushion floor, Spread %). **APPROVED**.
-3. **Execution & Hash**: Order executes on Alpaca Paper API. A canonical SHA-256 snapshot hash is minted.
-4. **Replay Verifier**: Click **"Verify Trade"** to see both the **Cryptographic Hash Integrity Check** and the **Rationale Numeric Condition Check** pass independently.
-5. **Guaranteed Rejection (15s)**: Trigger a high-leverage scenario where Vega pushes beyond the `-250` limit. Kernel instantly rejects with the exact live numeric violation, e.g. `Vega would push portfolio to -312.0, limit is -250.0 — REJECTED` (the specific number reflects the real account's current Greeks and current market prices, so it varies run to run).
+### Strategy Arena — strategies compete for the right to trade
+The agent maintains a **population** of strategy variants (iron condors at different wing widths
+and profit targets, put/call credit spreads, a debit spread, a long strangle). Every variant is
+replayed over the **same real historical closes** and scored on a published composite:
 
-### Act 2 — TradeTrap Defense (Adversarial Robustness)
-1. Simulate a corrupted local ledger (a documented failure mode in published LLM trading research) using the **Fault Injector** (injects phantom `AAPL x 9`).
-2. The background automated reconciliation loop (running on a 30s timer) polls Alpaca's real position endpoint, detects the divergence, and **automatically halts all trading via Kill Switch** with zero manual intervention.
+```
+35% expectancy + 20% Sharpe + 15% win rate + 15% drawdown (inverted) + 15% deflated Sharpe
+```
 
-### Act 3 — Blindfold VRP Experiment (Strategy Honesty)
-1. Run identical market contexts under normal vs anonymized pseudonym tokens (`SPY` $\rightarrow$ `ASSET_04`).
-2. Compare whether the LLM recommends the same structure, comparable conviction ($\pm 0.10$), and identical regime tags.
-3. Reports a verified **100.0% Agreement Rate**, proving the agent is reasoning about volatility mechanics rather than memorized ticker names.
+The champion must be **eligible for the current regime AND out-score the field**. Eligibility is
+set by deterministic code, never by the score — an ineligible variant cannot win even with the
+best numbers, and there is a test asserting exactly that. Losing variants stay on the leaderboard
+with their real numbers so the selection is inspectable rather than a black box.
+
+> **Disclosed bias:** entry premium is modeled as `IV = trailing realized vol x 1.15`, because free
+> granular historical options pricing does not exist. That structurally flatters premium *sellers*.
+> Cross-variant ranking within a family is meaningful; absolute returns and short-vs-long-vol
+> comparisons are not. The dashboard states this on the Arena tab rather than hiding it.
+
+### Regime Engine — six regimes, from real numbers only
+`HIGH_VOL_RANGE`, `HIGH_VOL_TREND`, `LOW_VOL_TREND`, `LOW_VOL_RANGE`, `VOL_EXPANSION`, `EVENT_RISK`
+— classified from IV rank, VRP, real CBOE VIX, 20-session trend, EMA stretch and the 10d/60d
+realized-vol expansion ratio. **A missing VIX classifies as `EVENT_RISK`, not as "probably fine".**
+
+### Nothing is ever invented
+This is the project's core discipline, enforced throughout:
+
+- No LLM reachable → deterministic rules, and the output is **labelled** as such.
+- No live option quote → Black-Scholes from a real reference price, tagged via `quote_source`.
+- No VIX → the kernel **rejects**; it does not substitute a plausible constant.
+- No historical bars → the arena reports "unavailable" rather than scoring on nothing.
+- The dashboard renders `—` while loading. It never shows a placeholder number that looks real.
+- The provider chip reports **READY** (configured, unverified) versus **LIVE** (a call actually
+  succeeded), because an exhausted API key looks perfectly configured until it returns 429.
 
 ---
 
-## 🚀 Quickstart & Installation
+## The three live demos
 
-### 1. Prerequisites
-- Python 3.10+
-- Alpaca Paper Trading API keys (free) — powers real live market data (stock bars, options chain,
-  Greeks) and real multi-leg options order execution. Without keys, the app still runs against a
-  clearly-labeled simulated feed (every response is tagged `data_source: "simulated"`) so the UI
-  remains usable for local development.
-- Gemini API key (or OpenRouter as fallback) — without either, the system falls back to a
-  deterministic rule-based Intent generator (fail-closed, never a black box).
+**Act 1 — the gate actually bites.** A real trade runs the full path and is approved and executed.
+Then an intentionally oversized short-vol structure is proposed. It is rejected with the exact
+numbers it broke (e.g. `Position size 15.6% exceeds max 5.0%`, `Vega would push portfolio to
+-396.9, limit is -250.0`). The rejection is sized dynamically against the account's **actual**
+current vega, so it is a genuine breach every time rather than a scripted one.
 
-### 2. Install Dependencies
+**Act 2 — TradeTrap.** A phantom position is injected into the local ledger only. The 30-second
+reconciliation loop compares believed vs. real broker state, detects the divergence and fires the
+kill switch with no human in the loop. Clearing the fault restores a clean, tradable state.
+
+**Act 3 — Blindfold.** The same real numbers are put to the model twice: once as `SPY`, once as
+`ASSET_04`. Matching structure and conviction is evidence the model is reasoning from volatility
+mechanics rather than a memorised ticker.
+
+**Or press one button.** The **Judge Demo** tab runs all of it end to end as a 12-step timeline —
+perception, regime, tournament, reasoning, kernel, audit, replay verification, guaranteed
+rejection, TradeTrap halt, recovery, and the measured learning state. Every step is the real
+production code path, not an animation.
+
+---
+
+## Quickstart
+
+### 1. Install
 ```bash
 pip install -r requirements.txt
 ```
 
-### 3. Configure Environment
+### 2. Configure
 ```bash
 cp .env.example .env
-# Edit .env with your credentials if desired
 ```
 
-### 4. Run Automated Test Suite
+| Variable | Required? | What happens without it |
+|---|---|---|
+| `ALPACA_API_KEY` / `ALPACA_SECRET_KEY` | Recommended | Falls back to a clearly-labelled simulated feed (`data_source: "simulated"`) |
+| `OPENROUTER_API_KEY` | **Recommended** | See below |
+| `GEMINI_API_KEY` | Optional | Falls through to OpenRouter |
+
+**On LLM providers:** every LLM feature — Intent generation, post-trade reflection, and the copilot
+chat — goes through one client that tries **Gemini first, then OpenRouter**, then deterministic
+rules. Configuring a second provider is what keeps the AI panels alive when the first key is rate
+limited or out of credit. `OPENROUTER_MODEL` accepts any OpenRouter model slug.
+
+### 3. Run
 ```bash
-pytest tests/ -v
+python run.py
 ```
-*The Risk Kernel, Replay Verifier, and cryptographic-hash tamper-detection tests run fully offline
-on constructed fixtures. The reconciliation, backtest, and full API test files exercise the real
-Alpaca paper account and market-data feeds when credentials are configured.*
+The entrypoint reads `PORT` from `.env` and **automatically shifts to the next free port** if that
+one is taken, printing the URL it actually bound to. Use `python run.py --strict` to fail instead.
 
-### 5. Launch Web Dashboard
+### 4. Test
 ```bash
-python -m uvicorn web.app:app --host 127.0.0.1 --port 8000
+pytest tests/ --ignore=tests/test_api.py -q     # 68 offline tests, no side effects
 ```
-Open **`http://127.0.0.1:8000`** in your browser to experience the Glassmorphism interactive dashboard.
+
+> ⚠️ `tests/test_api.py` exercises the **real** Alpaca paper account: it places a real multi-leg
+> order and closes real profitable positions. Paper money, but real side effects. It is excluded
+> from the command above deliberately.
 
 ---
 
-## 🌟 Advanced Features & Visual Analytics
+## Dashboard
 
-* **🔍 Dynamic Multi-Asset Universe**: Type **ANY optionable stock ticker** (e.g. `META`, `MSFT`, `AMZN`, `GOOGL`, `AMD`, `COIN`, `PLTR`) or use one-touch quick pills. Pulls that ticker's real, currently-listed options chain from Alpaca (strikes, expiries, OCC symbols, open interest), enriched with live bid/ask/IV/Greeks where a live quote exists.
-* **📈 Interactive Payoff & Volatility Smile**: Real-time Canvas Payoff diagrams rendering Lower/Upper Breakevens, Max Profit zone, Max Loss boundaries, and Implied Volatility Skew from the real chain.
-* **🛡️ Radial Risk Limit Gauges**: Real-time SVG radial meters tracking Portfolio Delta ($\pm 250\Delta$) and Short-Vol Vega ($-250\nu$), computed from the live Greeks of your actual open positions, and Cash Cushion Reserve Floor ($\ge 20\%$).
-* **📊 Historical Backtest & Deflated Sharpe Ratio (DSR)**: Simulates the strategy over real historical underlying prices (Alpaca stock bars); entry option premium is modeled with Black-Scholes off the real trailing realized-volatility at each historical point (a disclosed, standard substitute for a paid historical-options-chain subscription), while the expiry payoff is exact against the real terminal price. *Bailey & López de Prado (2014)* DSR calculation and interactive equity curve to quantify overfitting risk.
-* **🤖 Autonomous Continuous Auto-Trading Mode**: Unattended background loop continuously scanning assets, proposing defined-risk strategies, checking risk boundaries, and executing real multi-leg combo orders (Alpaca `order_class=MLEG`) with automated 30s reconciliation. Skips cycles automatically while the market is closed.
-
----
-
-## 📚 Documentation Index
-
-| Guide | Description | Link |
-| :--- | :--- | :--- |
-| **System Architecture** | Deep dive into the 5 core modules, sequence diagrams, and mathematical models. | [ARCHITECTURE.md](docs/ARCHITECTURE.md) |
-| **System Workflow** | Step-by-step trace of live pipeline execution, hashing, and reconciliation. | [SYSTEM_WORKFLOW.md](docs/SYSTEM_WORKFLOW.md) |
-| **Demo Script** | 2-minute 3-act presentation script with exact timestamp cues for recording. | [DEMO_SCRIPT.md](docs/DEMO_SCRIPT.md) |
-| **Judge Q&A Preparation** | Rehearsed answers to the top 5 toughest technical judge questions. | [JUDGE_QA.md](docs/JUDGE_QA.md) |
+| Tab | What it shows |
+|---|---|
+| **Terminal** | Live chart, real options chain, payoff and volatility-smile curves |
+| **Studio** | Arena-gated pipeline with a **dry-run** toggle, all 10 live kernel checks, AI copilot |
+| **Memory** | Win rate, realized P&L, adaptive parameters, post-trade reflections (labelled by provider) |
+| **Holdings** | Live Alpaca positions and orders, profit-target harvesting |
+| **Audit** | SHA-256 snapshots with independent replay verification |
+| **Backtest** | Real historical replay with Deflated Sharpe Ratio |
+| **Arena** | Regime engine signals + the strategy tournament leaderboard |
+| **TradeTrap** | Fault injector, kill switch, reconciliation log |
+| **Blindfold** | Ticker-blindness honesty experiment |
+| **Demo** | The whole story, one button |
 
 ---
 
-## ⚖️ Built For
-**Alpaca AI Trading Agents Hackathon on lablab.ai**  
+## Frozen data contracts
+
+1. **`Intent`** (`shared/schemas.py`) — schema-validated legs, structures, and numeric rationale.
+2. **`kernel/config.yaml`** — versioned, human-readable risk limits. Limits that are declared but
+   *not* enforced (e.g. `min_daily_volume`, which no free feed supports) say so explicitly, and the
+   dashboard reports the count the kernel **actually** enforces.
+3. **`AuditSnapshot`** (`verification/snapshot.py`) — SHA-256 over canonical
+   `market_state + account_state + intent_id`.
+4. **`ReconciliationEvent`** (`verification/reconciliation.py`) — believed state vs. broker truth.
+
+---
+
+## Documentation
+
+| Guide | Description |
+| :--- | :--- |
+| [ARCHITECTURE.md](docs/ARCHITECTURE.md) | Module deep dive, sequence diagrams, mathematical models |
+| [SYSTEM_WORKFLOW.md](docs/SYSTEM_WORKFLOW.md) | Step-by-step trace of pipeline, hashing, reconciliation |
+| [DEMO_SCRIPT.md](docs/DEMO_SCRIPT.md) | Presentation script with timing cues |
+| [JUDGE_QA.md](docs/JUDGE_QA.md) | Rehearsed answers to the toughest technical questions |
+
+---
+
+## Built for
+**Alpaca AI Trading Agents Hackathon — lablab.ai**
 *Track: Verifiable Autonomous Trading & Robust Risk Architecture*
 
-## 🔒 4 Frozen Data Contracts
-
-1. **`Intent`** (`shared/schemas.py`): Pydantic model enforcing defined-risk legs, numeric rationale citations, and structure enums.
-2. **`KernelConfig`** (`kernel/config.yaml`): Versioned human-readable risk limits shown directly to judges.
-3. **`AuditSnapshot`** (`verification/snapshot.py`): SHA-256 hash over canonical `market_state + account_state + intent_id`.
-4. **`ReconciliationEvent`** (`verification/reconciliation.py`): Real-time comparison between believed state and Alpaca broker truth.
-
----
-
-## 🏆 Rubric Mapping for Judges
-
-| Rubric Dimension | How GlassBox Options Scores It |
-| :--- | :--- |
-| **Application of Technology** | Real Alpaca options API integration, pure deterministic risk kernel, SHA-256 cryptographic hashing, automatic background reconciliation loop. |
-| **Originality** | First agent combining hard risk boundaries, cryptographic audit replay, and live adversarial red-team defense. |
-| **Business Value** | Built specifically for RIAs and boutique funds requiring supervised, auditable autonomous trading without black-box risk. |
-| **Presentation** | Interactive three-act demo with live execution, guaranteed rejection proof, automated fault defense, and blindfold honesty metric. |
+All trading occurs on **Alpaca paper trading**. No real capital is at risk.

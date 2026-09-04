@@ -11,5 +11,9 @@ limits:
   require_defined_risk: true         # No naked legs, ever, no exceptions
   earnings_blackout_days: 2
   vix_kill_switch_level: 30.0
-  min_open_interest: 50
+  min_open_interest: 50              # Enforced: thinnest traded leg must clear this
+  # NOT ENFORCED. Per-contract daily volume is not available in the free Alpaca options feed
+  # (every contract reports 0), so gating on it would reject every trade. Listed here as the
+  # intended limit once a paid OPRA feed is available - declared honestly rather than silently
+  # doing nothing.
   min_daily_volume: 10

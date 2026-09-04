@@ -18,7 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from shared.schemas import (
-    Intent, OptionLeg, MarketContext, AccountState, KernelDecision,
+    Intent, OptionLeg, MarketContext, AccountState, KernelDecision, OptionContractQuote,
     AuditSnapshot, ReconciliationEvent, ReplayVerificationResult
 )
 from perception.alpaca_client import AlpacaClient
@@ -54,6 +54,8 @@ class AutonomousTrader:
         self._thread = None
         self.last_run_time = None
         self.trades_executed = 0
+        self.last_decision: Optional[Dict[str, Any]] = None
+        self.last_skip_reason: Optional[str] = None
 
     def start(self):
         if self.is_running:
@@ -88,40 +90,64 @@ class AutonomousTrader:
                 except Exception as e:
                     print(f"[POSITION MANAGER NOTE] {e}")
 
-                # 2. Scan universe for high-VRP defined-risk setups
+                # 2. Scan the universe, gating every candidate through the Strategy Arena first.
                 for sym in self.tickers:
                     if not self.is_running:
                         break
                     try:
                         ctx = alpaca_client.get_market_context(sym)
-                        
-                        # Only enter if VRP satisfies self-improved threshold
-                        if ctx.vrp >= self_improving_memory.params.vrp_entry_threshold:
-                            intent = reasoning_agent.propose_intent(ctx)
-                            decision = validate(intent, ctx.account_state, market_context=ctx)
-                            
-                            order_id = None
-                            if decision.approved and intent.size > 0:
-                                order_id = executor.execute_intent(intent, decision)
-                                if order_id:
-                                    self.trades_executed += 1
-                                    # Record in self-improving memory
-                                    self_improving_memory.record_entry(
-                                        intent_dict=intent.model_dump(),
-                                        market_ctx=ctx.model_dump(),
-                                        order_id=order_id,
-                                        decision_dict=decision.model_dump()
-                                    )
-                                    
-                            snapshot = create_audit_snapshot(
-                                ctx=ctx,
-                                account=ctx.account_state,
-                                intent=intent,
-                                decision=decision,
-                                order_id=order_id
+
+                        # Gate 1 - the self-improved VRP entry threshold.
+                        if ctx.vrp < self_improving_memory.params.vrp_entry_threshold:
+                            self.last_skip_reason = (
+                                f"{sym}: VRP {ctx.vrp:+.2f} below learned threshold "
+                                f"{self_improving_memory.params.vrp_entry_threshold}"
                             )
-                            audit_store.append(snapshot)
-                            print(f"[AUTONOMOUS LOOP] {sym}: {decision.decision} (Order: {order_id})")
+                            time.sleep(3)
+                            continue
+
+                        # Gate 2 - the Strategy Arena. No evidence-backed champion for the current
+                        # regime means no strategy has earned the right to trade this name now.
+                        arena = strategy_arena.run_tournament(ctx)
+                        if not arena.champion_id:
+                            self.last_skip_reason = f"{sym}: {arena.champion_rationale}"
+                            print(f"[AUTONOMOUS LOOP] {sym}: no arena champion - standing down.")
+                            time.sleep(3)
+                            continue
+
+                        intent = reasoning_agent.propose_intent(ctx, arena=arena)
+                        decision = validate(intent, ctx.account_state, market_context=ctx)
+
+                        order_id = None
+                        if decision.approved and intent.size > 0:
+                            order_id = executor.execute_intent(intent, decision)
+                            if order_id:
+                                self.trades_executed += 1
+                                self_improving_memory.record_entry(
+                                    intent_dict=intent.model_dump(),
+                                    market_ctx=ctx.model_dump(),
+                                    order_id=order_id,
+                                    decision_dict=decision.model_dump(),
+                                    estimated_credit=estimate_structure_credit(intent, ctx),
+                                    variant_id=arena.champion_id,
+                                )
+
+                        snapshot = create_audit_snapshot(
+                            ctx=ctx,
+                            account=ctx.account_state,
+                            intent=intent,
+                            decision=decision,
+                            order_id=order_id
+                        )
+                        audit_store.append(snapshot)
+                        self.last_decision = {
+                            "symbol": sym, "regime": arena.regime.regime,
+                            "champion": arena.champion_name, "decision": decision.decision,
+                            "order_id": order_id,
+                            "at": datetime.now(timezone.utc).isoformat(),
+                        }
+                        print(f"[AUTONOMOUS LOOP] {sym}: regime={arena.regime.regime} "
+                              f"champion={arena.champion_name} -> {decision.decision} (Order: {order_id})")
                     except Exception as e:
                         print(f"[AUTONOMOUS LOOP ERROR] {sym}: {e}")
                     time.sleep(3)
@@ -141,8 +167,35 @@ class AutonomousTrader:
             "interval_seconds": self.interval_seconds,
             "tickers": self.tickers,
             "last_run_time": self.last_run_time,
-            "trades_executed": self.trades_executed
+            "trades_executed": self.trades_executed,
+            "last_decision": self.last_decision,
+            "last_skip_reason": self.last_skip_reason,
         }
+
+def estimate_structure_credit(intent: Intent, ctx: MarketContext) -> Optional[float]:
+    """
+    Net credit (positive) or debit (negative) for an Intent, in dollars, priced from the REAL
+    option chain already fetched in this MarketContext.
+
+    This is what makes `max_profit` on a recorded trade a real number instead of a placeholder:
+    for a credit structure, the premium collected IS the maximum profit. Returns None when any
+    leg has no matching contract in the real chain - an unknown is reported as unknown rather
+    than estimated into existence.
+    """
+    if not ctx.contracts:
+        return None
+    total_per_share = 0.0
+    for leg in intent.legs:
+        match = next(
+            (c for c in ctx.contracts
+             if c.type == leg.type and abs(c.strike - leg.strike) < 1e-6 and c.expiry == leg.expiry),
+            None,
+        )
+        if match is None or match.mid <= 0:
+            return None
+        total_per_share += match.mid if leg.action == "sell" else -match.mid
+    return round(total_per_share * 100.0 * max(1, intent.size), 2)
+
 
 def hit_profit_target(position) -> bool:
     """
@@ -200,7 +253,69 @@ def get_system_status():
         "fault_injector": fault_status,
         "risk_limits": risk_limits,
         "autonomous_trader": auto_status,
+        "llm": reasoning_agent.get_provider_status(),
+        "market_clock": alpaca_client.get_market_clock(),
+        "data_source": account.data_source,
         "is_paper_trading": True
+    }
+
+@app.get("/api/config")
+def get_risk_config_file():
+    """
+    Returns the ACTUAL contents of kernel/config.yaml plus the parsed limits, so the dashboard
+    shows the live rulebook rather than a copy pasted into the HTML that can drift out of sync.
+    """
+    cfg_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "kernel", "config.yaml")
+    raw = ""
+    try:
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            raw = f.read()
+    except Exception as e:
+        raw = f"# Could not read kernel/config.yaml: {e}"
+    limits = load_risk_config()
+    # Report what the kernel ACTUALLY enforces, by running it once against a representative
+    # intent. Counting config keys would overstate it: min_daily_volume is declared but
+    # deliberately unenforced (no free per-contract volume data), and the dashboard must not
+    # advertise a rule that never fires.
+    enforced: List[str] = []
+    try:
+        probe = Intent(
+            underlying="SPY", structure="iron_condor",
+            legs=[
+                OptionLeg(action="sell", type="put", strike=100.0, expiry="2030-01-18"),
+                OptionLeg(action="buy", type="put", strike=95.0, expiry="2030-01-18"),
+                OptionLeg(action="sell", type="call", strike=110.0, expiry="2030-01-18"),
+                OptionLeg(action="buy", type="call", strike=115.0, expiry="2030-01-18"),
+            ],
+            size=1, rationale="config introspection probe", conviction=0.5,
+        )
+        probe_account = AccountState(buying_power=100000.0, cash=100000.0, portfolio_value=100000.0)
+        # A representative market context so every context-dependent gate (spread, open interest,
+        # VIX, earnings) reports itself - otherwise the count silently understates what runs.
+        probe_ctx = MarketContext(
+            underlying="SPY", underlying_price=105.0, iv_rank=50.0, realized_vol=15.0, vrp=1.0,
+            vix=16.0, account_state=probe_account,
+            contracts=[
+                OptionContractQuote(
+                    symbol=f"PROBE{leg.strike}", strike=leg.strike, expiry="2030-01-18",
+                    type=leg.type, bid=1.0, ask=1.02, mid=1.01, spread_pct=2.0,
+                    open_interest=1000, volume=0, delta=0.3, gamma=0.01, theta=-0.02,
+                    vega=0.1, implied_volatility=20.0,
+                )
+                for leg in probe.legs
+            ],
+        )
+        enforced = [c.check for c in validate(probe, probe_account, market_context=probe_ctx).kernel_checks]
+    except Exception as e:
+        print(f"[CONFIG INTROSPECTION WARNING] {e}")
+
+    return {
+        "path": "kernel/config.yaml",
+        "raw": raw,
+        "limits": limits,
+        "enforced_checks": enforced,
+        "enforced_count": len(enforced),
+        "declared_but_unenforced": [k for k in ("min_daily_volume",) if k in limits],
     }
 
 @app.post("/api/autonomous/toggle")
@@ -251,11 +366,13 @@ class ChatRequest(BaseModel):
 @app.post("/api/agent/chat")
 def chat_with_agent(req: ChatRequest):
     """
-    Live AI Copilot chat terminal powered by Gemini.
-    Provides instant numeric volatility analysis and trade structuring recommendations.
+    Live AI Copilot chat, backed by the shared multi-provider LLM client (Gemini -> OpenRouter).
+    Falls back to a clearly-labelled deterministic summary of the REAL current numbers when no
+    provider is reachable - it never invents analysis and never pretends a template is model output.
     """
     ctx = alpaca_client.get_market_context(req.symbol or "SPY")
-    
+    regime = classify_regime_detailed(ctx)
+
     prompt = f"""You are GlassBox Options Copilot, an elite quantitative options analyst.
 Current Market Context for {ctx.underlying}:
 - Spot Price: ${ctx.underlying_price}
@@ -263,27 +380,33 @@ Current Market Context for {ctx.underlying}:
 - Realized Vol (30d): {ctx.realized_vol}%
 - Volatility Risk Premium (VRP): {ctx.vrp} pts
 - VIX Index: {ctx.vix}
+- 20-session trend: {ctx.trend_20d_pct}%
+- Vol expansion ratio (10d/60d): {ctx.rv_expansion_ratio}
+- Classified regime: {regime.label} ({regime.regime})
 - Earnings Blackout (<2d): {ctx.is_earnings_blackout}
 
 User Question/Request: "{req.message}"
 
 Provide a concise, highly quantitative response citing the exact numbers above. Recommend defined-risk structures (e.g. Iron Condor, Put Credit Spread) when IV Rank > 50% and VRP > 0, or explain risk boundaries if high volatility/earnings blackout."""
 
-    reply_source = "gemini"
-    try:
-        if reasoning_agent.gemini_client:
-            res = reasoning_agent.gemini_client.generate_content(prompt)
-            answer = res.text.strip()
-        else:
-            reply_source = "template_fallback"
-            answer = f"[Template - Gemini unavailable] IV Rank is {ctx.iv_rank}%, VRP is +{ctx.vrp} pts for {ctx.underlying}. Statistical edge favors selling defined-risk premium via Iron Condor or Credit Spread."
-    except Exception as e:
+    result = reasoning_agent.llm.generate(prompt)
+    if result.ok:
+        answer, reply_source = result.text.strip(), result.provider
+    else:
         reply_source = "template_fallback"
-        answer = f"[Template - Gemini call failed: {e}] IV Rank {ctx.iv_rank}%, VRP +{ctx.vrp} pts for {ctx.underlying}. Recommended structure: Defined-risk Iron Condor harvesting elevated theta."
+        vix_txt = f"{ctx.vix}" if ctx.vix is not None else "UNAVAILABLE"
+        answer = (
+            f"[Deterministic summary - no LLM provider reachable. This is not model analysis.]\n"
+            f"{ctx.underlying} at ${ctx.underlying_price}. IV rank {ctx.iv_rank}%, realized vol "
+            f"{ctx.realized_vol}%, VRP {ctx.vrp:+.2f} pts, VIX {vix_txt}. "
+            f"Regime: {regime.label}. {regime.description} "
+            f"Configure GEMINI_API_KEY or OPENROUTER_API_KEY in .env for full analyst commentary."
+        )
 
     return {
         "reply": answer,
         "reply_source": reply_source,
+        "provider_status": reasoning_agent.llm.get_status(),
         "market_context": ctx.model_dump()
     }
 
@@ -348,6 +471,9 @@ def harvest_profitable_positions():
 
 class ProposeRequest(BaseModel):
     symbol: str = "SPY"
+    # When true the full decision path runs but an approved order is NOT sent to the broker.
+    # Lets the pipeline be demonstrated repeatedly without accumulating positions.
+    dry_run: bool = False
 
 @app.post("/api/pipeline/run")
 def run_full_glassbox_pipeline(req: ProposeRequest):
@@ -476,7 +602,7 @@ def run_arena_driven_pipeline(req: ProposeRequest):
     decision = validate(intent, ctx.account_state, market_context=ctx)
 
     order_id = None
-    if decision.approved and intent.size > 0:
+    if decision.approved and intent.size > 0 and not req.dry_run:
         order_id = executor.execute_intent(intent, decision)
         if order_id:
             self_improving_memory.record_entry(
@@ -484,6 +610,8 @@ def run_arena_driven_pipeline(req: ProposeRequest):
                 market_ctx=ctx.model_dump(),
                 order_id=order_id,
                 decision_dict=decision.model_dump(),
+                estimated_credit=estimate_structure_credit(intent, ctx),
+                variant_id=arena.champion_id,
             )
 
     snapshot = create_audit_snapshot(
@@ -498,6 +626,7 @@ def run_arena_driven_pipeline(req: ProposeRequest):
         "intent": intent.model_dump(),
         "decision": decision.model_dump(by_alias=True),
         "order_id": order_id,
+        "dry_run": req.dry_run,
         "snapshot": snapshot.model_dump(),
     }
 

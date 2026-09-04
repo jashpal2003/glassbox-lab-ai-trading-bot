@@ -14,6 +14,7 @@ import requests
 
 from shared.schemas import MarketContext, Intent, OptionLeg
 from reasoning.regime_engine import classify_regime, classify_regime_detailed
+from reasoning.llm_client import LLMClient
 
 
 def _snap_legs_to_real_contracts(intent: Intent, ctx: MarketContext) -> Intent:
@@ -56,25 +57,18 @@ def get_system_prompt() -> str:
 
 class LLMReasoningAgent:
     def __init__(self):
-        self.gemini_key = os.getenv("GEMINI_API_KEY", "")
-        self.openrouter_key = os.getenv("OPENROUTER_API_KEY", "")
-        self.gemini_model = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
-        self.openrouter_model = os.getenv("OPENROUTER_MODEL", "anthropic/claude-3.5-sonnet")
         self.system_prompt = get_system_prompt()
-        self.gemini_client = None
+        # One shared multi-provider client (Gemini -> OpenRouter -> deterministic). The reflection
+        # engine reuses this exact client so a working secondary provider benefits every LLM
+        # feature, not just Intent generation.
+        self.llm = LLMClient(system_instruction=self.system_prompt)
 
-        if self.gemini_key and not self.gemini_key.startswith("your_"):
-            try:
-                import google.generativeai as genai
-                genai.configure(api_key=self.gemini_key)
-                self.gemini_client = genai.GenerativeModel(
-                    model_name=self.gemini_model,
-                    system_instruction=self.system_prompt
-                )
-                from reasoning.self_improvement import self_improving_memory
-                self_improving_memory.gemini_client = self.gemini_client
-            except Exception as e:
-                print(f"Gemini client initialization warning: {e}")
+        from reasoning.self_improvement import self_improving_memory
+        self_improving_memory.llm = self.llm
+
+    def get_provider_status(self) -> Dict[str, Any]:
+        """Which LLM provider is actually answering right now - surfaced in the dashboard."""
+        return self.llm.get_status()
 
     def propose_intent(
         self,
@@ -163,52 +157,20 @@ class LLMReasoningAgent:
         )
 
     def _call_llm(self, user_content: str) -> Optional[str]:
-        """Calls Gemini API, OpenRouter API, or returns None."""
-        # 1. Google Gemini
-        if self.gemini_client:
-            try:
-                response = self.gemini_client.generate_content(
-                    user_content,
-                    # Low temperature: this system's whole premise is deterministic, auditable
-                    # risk-structuring, not creative variance - the LLM should reach the same
-                    # structure/conviction for the same numeric inputs run to run.
-                    generation_config={"response_mime_type": "application/json", "temperature": 0.2}
-                )
-                if response and response.text:
-                    return response.text
-            except Exception as e:
-                print(f"Gemini API call warning: {e}. Trying OpenRouter fallback...")
+        """
+        Generates via the shared multi-provider client (Gemini -> OpenRouter). Returns None when
+        no provider could answer, which the caller treats as "use the deterministic path", never
+        as "make something up".
 
-        # 2. OpenRouter fallback
-        if self.openrouter_key and not self.openrouter_key.startswith("your_"):
-            try:
-                headers = {
-                    "Authorization": f"Bearer {self.openrouter_key}",
-                    "Content-Type": "application/json",
-                    "HTTP-Referer": "https://glassbox-options.ai",
-                    "X-Title": "GlassBox Options"
-                }
-                payload = {
-                    "model": self.openrouter_model,
-                    "messages": [
-                        {"role": "system", "content": self.system_prompt},
-                        {"role": "user", "content": user_content}
-                    ],
-                    "response_format": {"type": "json_object"},
-                    "temperature": 0.2
-                }
-                resp = requests.post(
-                    "https://openrouter.ai/api/v1/chat/completions",
-                    headers=headers,
-                    json=payload,
-                    timeout=10
-                )
-                if resp.status_code == 200:
-                    data = resp.json()
-                    return data["choices"][0]["message"]["content"]
-            except Exception as e:
-                print(f"OpenRouter API call failed: {e}")
-
+        JSON mode + low temperature: this system's premise is deterministic, auditable
+        risk-structuring, not creative variance - the same numeric inputs should reach the same
+        structure and conviction run to run.
+        """
+        self.last_provider = None
+        response = self.llm.generate(user_content, json_mode=True)
+        if response.ok:
+            self.last_provider = response.provider
+            return response.text
         return None
 
     def _parse_and_validate(self, text: str, underlying: str) -> Optional[Intent]:

@@ -21,6 +21,7 @@ document.addEventListener('DOMContentLoaded', () => {
   loadAuditSnapshots();
   loadSelfImprovingMemory();
   loadCandleChart();
+  loadRiskConfig();          // real kernel/config.yaml drives the rule count + modal
 
   // Background polling intervals
   setInterval(refreshSystemStatus, 3000);
@@ -622,10 +623,18 @@ async function simulateReflection(symbol, pnl) {
       })
     });
     const data = await res.json();
-    alert(`Learned from simulated ${pnl >= 0 ? 'WIN' : 'LOSS'} on ${symbol}!\nGemini Reflection: ${data.trade.reflection}`);
+    // Label the reflection with whoever actually produced it - a canned template must never be
+    // presented as model insight.
+    const src = data.trade?.reflection_source || 'unknown';
+    const srcLabel = src === 'template_fallback' ? 'deterministic template (no LLM reachable)' : src;
+    toast(data.trade?.reflection || 'Reflection recorded.', {
+      type: pnl >= 0 ? 'success' : 'warn',
+      title: `Learned from simulated ${pnl >= 0 ? 'WIN' : 'LOSS'} on ${symbol} - via ${srcLabel}`,
+      timeout: 10000,
+    });
     await loadSelfImprovingMemory();
   } catch (err) {
-    alert('Reflection simulation error: ' + err);
+    toastError(err.message || err, 'Reflection simulation failed');
   }
 }
 
@@ -633,12 +642,12 @@ async function harvestProfitablePositions() {
   try {
     const res = await fetch(`${API_BASE}/api/positions/harvest`, { method: 'POST' });
     const data = await res.json();
-    alert(`Harvested ${data.harvested_count} profitable positions and updated self-improving memory!`);
+    toastOk(`${data.harvested_count} position(s) closed at target and fed to the reflection engine.`, 'Harvest complete');
     await loadLivePositions();
     await loadSelfImprovingMemory();
     await refreshSystemStatus();
   } catch (err) {
-    alert('Harvest error: ' + err);
+    toastError(err.message || err, 'Harvest failed');
   }
 }
 
@@ -664,6 +673,8 @@ async function refreshSystemStatus() {
       statusPill.className = 'status-pill';
       statusText.textContent = 'HEALTHY';
     }
+
+    renderProviderChip(data.llm);
 
     const autoBtn = document.getElementById('btn-auto-trader');
     if (autoBtn && data.autonomous_trader) {
@@ -711,7 +722,7 @@ async function toggleAutoTrading() {
     await fetch(`${API_BASE}/api/autonomous/toggle`, { method: 'POST' });
     await refreshSystemStatus();
   } catch (err) {
-    alert('Auto trading toggle error: ' + err);
+    toastError(err.message || err, 'Could not toggle autonomous trading');
   }
 }
 
@@ -787,12 +798,12 @@ async function closeLivePosition(symbol) {
   try {
     const res = await fetch(`${API_BASE}/api/positions/${encodeURIComponent(symbol)}`, { method: 'DELETE' });
     const data = await res.json();
-    alert(`Closed position: ${symbol}`);
+    toastOk(`Close order submitted for ${symbol}.`, 'Position closing');
     await loadLivePositions();
     await loadSelfImprovingMemory();
     await refreshSystemStatus();
   } catch (err) {
-    alert('Close position error: ' + err);
+    toastError(err.message || err, 'Could not close position');
   }
 }
 
@@ -843,21 +854,23 @@ async function runAct1Pipeline() {
   }
 
   try {
-    const res = await fetch(`${API_BASE}/api/pipeline/run`, {
+    // Arena-gated path: regime -> strategy tournament -> evidence-backed proposal -> risk kernel.
+    const dryRun = document.getElementById('studio-dry-run')?.checked ?? false;
+    const data = await apiFetch('/api/pipeline/arena_run', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ symbol })
+      body: JSON.stringify({ symbol, dry_run: dryRun })
     });
 
-    const data = await res.json();
     renderAct1Results(data);
+    renderStudioArenaContext(data);
     await loadAuditSnapshots();
     await refreshSystemStatus();
     await loadLivePositions();
     await loadSelfImprovingMemory();
     loadPayoffAndSmileData(symbol);
   } catch (err) {
-    alert('Pipeline error: ' + err);
+    toastError(err.message || err, 'Pipeline failed');
   } finally {
     if (runBtn) {
       runBtn.disabled = false;
@@ -882,7 +895,7 @@ async function runGuaranteedRejection() {
     await loadAuditSnapshots();
     await refreshSystemStatus();
   } catch (err) {
-    alert('Rejection scenario error: ' + err);
+    toastError(err.message || err, 'Rejection scenario failed');
   } finally {
     if (btn) {
       btn.disabled = false;
@@ -905,9 +918,17 @@ function renderAct1Results(data) {
     // kernel/executor.py). It's null both for real submission failures and for the scripted
     // guaranteed-rejection scenario (which never calls the executor at all) - never claim a
     // fill happened when order_id is missing, that would be fabricating a broker confirmation.
-    statusText.textContent = data.order_id ? 'APPROVED (FILLED ON ALPACA)' : 'APPROVED (NOT SUBMITTED)';
+    if (data.order_id) {
+      statusText.textContent = 'APPROVED (SUBMITTED TO ALPACA)';
+      orderPill.textContent = data.order_id;
+    } else if (data.dry_run) {
+      statusText.textContent = 'APPROVED (DRY RUN - NOT SUBMITTED)';
+      orderPill.textContent = 'DRY RUN';
+    } else {
+      statusText.textContent = 'APPROVED (NOT SUBMITTED)';
+      orderPill.textContent = 'NONE (NOT SUBMITTED)';
+    }
     statusText.style.color = 'var(--accent-emerald)';
-    orderPill.textContent = data.order_id || 'NONE (NOT SUBMITTED)';
     rejectionBox.style.display = 'none';
   } else {
     statusText.textContent = 'REJECTED (BLOCKED BY KERNEL)';
@@ -1040,10 +1061,6 @@ function closeReplayModal() {
   document.getElementById('replay-modal').style.display = 'none';
 }
 
-function openConfigModal() {
-  document.getElementById('config-modal').style.display = 'flex';
-}
-
 function closeConfigModal() {
   document.getElementById('config-modal').style.display = 'none';
 }
@@ -1072,7 +1089,7 @@ async function executeBacktestTabRun() {
 
     drawBacktestTabEquityCurve(data.equity_curve);
   } catch (err) {
-    alert('Backtest simulation error: ' + err);
+    toastError(err.message || err, 'Backtest failed');
   }
 }
 
@@ -1126,7 +1143,7 @@ async function injectPhantomFault() {
     });
     await loadAct2Status();
   } catch (err) {
-    alert('Fault injection error: ' + err);
+    toastError(err.message || err, 'Fault injection failed');
   }
 }
 
@@ -1135,7 +1152,7 @@ async function clearPhantomFault() {
     await fetch(`${API_BASE}/api/act2/clear_fault`, { method: 'POST' });
     await loadAct2Status();
   } catch (err) {
-    alert('Clear fault error: ' + err);
+    toastError(err.message || err, 'Could not clear fault');
   }
 }
 
@@ -1146,7 +1163,7 @@ async function triggerReconcileNow() {
     await loadReconciliationLog();
     await refreshSystemStatus();
   } catch (err) {
-    alert('Reconciliation error: ' + err);
+    toastError(err.message || err, 'Reconciliation failed');
   }
 }
 
@@ -1156,7 +1173,7 @@ async function resetKillSwitchAction() {
     await loadAct2Status();
     await refreshSystemStatus();
   } catch (err) {
-    alert('Kill switch reset error: ' + err);
+    toastError(err.message || err, 'Could not reset kill switch');
   }
 }
 
@@ -1626,4 +1643,196 @@ function renderDemoStepExtra(st) {
     return '<div style="margin-top: 0.35rem; font-family: var(--font-mono); font-size: 0.66rem; color: var(--accent-cyan); word-break: break-all;">' + d.hash + '</div>';
   }
   return '';
+}
+
+/* ==========================================================================
+   PRODUCTION LAYER
+   Toasts, resilient fetch, LLM provider health, real config loading.
+   ========================================================================== */
+
+// --- Toast notifications (non-blocking replacement for alert()) -----------
+function ensureToastHost() {
+  let host = document.getElementById('toast-host');
+  if (!host) {
+    host = document.createElement('div');
+    host.id = 'toast-host';
+    host.setAttribute('role', 'status');
+    host.setAttribute('aria-live', 'polite');
+    document.body.appendChild(host);
+  }
+  return host;
+}
+
+function toast(message, { type = 'info', title = '', timeout = 6000 } = {}) {
+  const host = ensureToastHost();
+  const el = document.createElement('div');
+  el.className = `toast toast-${type}`;
+
+  const body = document.createElement('div');
+  body.className = 'toast-body';
+  if (title) {
+    const t = document.createElement('div');
+    t.className = 'toast-title';
+    t.textContent = title;
+    body.appendChild(t);
+  }
+  const m = document.createElement('div');
+  m.className = 'toast-msg';
+  m.textContent = message;             // textContent: never inject markup from an error string
+  body.appendChild(m);
+
+  const close = document.createElement('button');
+  close.className = 'toast-close';
+  close.setAttribute('aria-label', 'Dismiss notification');
+  close.textContent = '×';
+  close.onclick = () => dismissToast(el);
+
+  el.appendChild(body);
+  el.appendChild(close);
+  host.appendChild(el);
+
+  if (timeout) setTimeout(() => dismissToast(el), timeout);
+  return el;
+}
+
+function dismissToast(el) {
+  if (!el || !el.parentNode) return;
+  el.classList.add('leaving');
+  setTimeout(() => el.remove(), 200);
+}
+
+const toastError = (msg, title = 'Something went wrong') => toast(String(msg), { type: 'error', title, timeout: 9000 });
+const toastOk = (msg, title = '') => toast(msg, { type: 'success', title });
+const toastWarn = (msg, title = '') => toast(msg, { type: 'warn', title, timeout: 8000 });
+
+// --- Resilient fetch -------------------------------------------------------
+/**
+ * fetch + JSON with a timeout and a real error message.
+ * Surfaces the server's own detail when it sends one, instead of a bare "500".
+ */
+async function apiFetch(path, options = {}, { timeoutMs = 120000 } = {}) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(`${API_BASE}${path}`, { ...options, signal: controller.signal });
+    let payload = null;
+    const text = await res.text();
+    try { payload = text ? JSON.parse(text) : null; } catch { payload = null; }
+
+    if (!res.ok) {
+      const detail = (payload && (payload.detail || payload.message)) || text.slice(0, 200) || res.statusText;
+      throw new Error(`${res.status} ${detail}`);
+    }
+    return payload;
+  } catch (err) {
+    if (err.name === 'AbortError') throw new Error(`Request timed out after ${Math.round(timeoutMs / 1000)}s: ${path}`);
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// --- LLM provider health chip ---------------------------------------------
+const PROVIDER_CHIP = {
+  LIVE:           { cls: 'provider-live',     icon: '●', label: p => `AI: ${p || 'live'}` },
+  READY:          { cls: 'provider-ready',    icon: '○', label: () => 'AI: ready' },
+  DEGRADED:       { cls: 'provider-degraded', icon: '△', label: () => 'AI: deterministic' },
+  NOT_CONFIGURED: { cls: 'provider-off',      icon: '○', label: () => 'AI: not configured' },
+};
+
+function renderProviderChip(llm) {
+  if (!llm) return;
+  let chip = document.getElementById('llm-provider-chip');
+  if (!chip) {
+    chip = document.createElement('span');
+    chip.id = 'llm-provider-chip';
+    const anchor = document.querySelector('.broker-badge');
+    if (anchor && anchor.parentNode) anchor.parentNode.insertBefore(chip, anchor.nextSibling);
+    else return;
+  }
+  const spec = PROVIDER_CHIP[llm.mode] || PROVIDER_CHIP.NOT_CONFIGURED;
+  chip.className = `provider-chip ${spec.cls}`;
+  chip.textContent = `${spec.icon} ${spec.label(llm.active_provider)}`;
+
+  const gem = llm.gemini || {}, orr = llm.openrouter || {};
+  chip.title =
+    `${llm.detail}\n` +
+    `Gemini (${gem.model}): ${gem.configured ? 'configured' : 'not configured'}` +
+    `${gem.last_error ? ' - ' + gem.last_error : ''}\n` +
+    `OpenRouter (${orr.model}): ${orr.configured ? 'configured' : 'not configured'}` +
+    `${orr.last_error ? ' - ' + orr.last_error : ''}\n` +
+    `Fallback: ${llm.fallback}`;
+}
+
+// --- Real risk config (kernel/config.yaml, not a pasted copy) -------------
+let cachedRiskConfig = null;
+
+async function loadRiskConfig() {
+  try {
+    const data = await apiFetch('/api/config');
+    cachedRiskConfig = data;
+    const pre = document.getElementById('config-yaml-display');
+    if (pre) pre.textContent = data.raw;
+
+    // The heading reports rules the kernel ACTUALLY enforces, not the number of config keys -
+    // one declared limit (min_daily_volume) is deliberately unenforced for lack of free data.
+    const countEl = document.getElementById('kernel-rule-count');
+    if (countEl && typeof data.enforced_count === 'number') {
+      countEl.textContent = data.enforced_count;
+      countEl.title = `Enforced: ${(data.enforced_checks || []).join(', ')}` +
+        ((data.declared_but_unenforced || []).length
+          ? `\nDeclared but not enforced: ${data.declared_but_unenforced.join(', ')}`
+          : '');
+    }
+    return data;
+  } catch (err) {
+    const pre = document.getElementById('config-yaml-display');
+    if (pre) pre.textContent = `Could not load kernel/config.yaml: ${err.message}`;
+  }
+  return null;
+}
+
+async function openConfigModal() {
+  document.getElementById('config-modal').style.display = 'flex';
+  await loadRiskConfig();
+}
+
+// --- Global safety nets ----------------------------------------------------
+window.addEventListener('unhandledrejection', (e) => {
+  console.error('Unhandled promise rejection:', e.reason);
+});
+
+// Keyboard: Escape closes any open modal.
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    document.querySelectorAll('.modal-overlay').forEach(m => {
+      if (m.style.display === 'flex') m.style.display = 'none';
+    });
+  }
+});
+
+/**
+ * Shows the regime + arena evidence that shaped an arena-gated pipeline run, so the Strategy
+ * Studio makes it visible that the proposal was constrained by measured evidence rather than
+ * being a free-form model guess.
+ */
+function renderStudioArenaContext(data) {
+  const box = document.getElementById('studio-arena-context');
+  if (!box) return;
+  const regime = data.regime, arena = data.arena;
+  if (!regime || !arena) { box.style.display = 'none'; return; }
+
+  const eligible = (arena.scores || []).filter(s => s.eligible);
+  box.style.display = 'block';
+  box.innerHTML =
+    '<div style="background: rgba(99,102,241,0.07); border-left: 3px solid var(--accent-indigo); border-radius: 6px; padding: 0.7rem 0.85rem;">' +
+      '<div style="display:flex; justify-content:space-between; align-items:center; gap:0.5rem; flex-wrap:wrap;">' +
+        '<strong style="font-size:0.82rem; color:#fff;">Regime: ' + regime.label + '</strong>' +
+        '<span class="card-badge badge-indigo">' + (arena.champion_name || 'NO CHAMPION') + '</span>' +
+      '</div>' +
+      '<div style="font-size:0.73rem; color:var(--text-muted); margin-top:0.3rem;">' +
+        eligible.length + ' of ' + (arena.scores || []).length + ' strategies eligible here. ' +
+        (arena.champion_rationale || '') +
+      '</div>' +
+    '</div>';
 }
